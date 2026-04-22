@@ -5,11 +5,11 @@ import math
 import os
 import re
 import tempfile
+import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from functools import lru_cache
 from html import unescape
 from html.parser import HTMLParser
 from pathlib import Path
@@ -31,6 +31,7 @@ OPENAI_CONFIGURED = bool(os.getenv("OPENAI_API_KEY"))
 DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 }
+SHOW_TITLE = "Hoosier Health Matters"
 
 
 class PlainTextHTMLParser(HTMLParser):
@@ -47,7 +48,16 @@ class PlainTextHTMLParser(HTMLParser):
 
 
 def get_logo_path() -> Path:
-    return ASSETS_DIR / "HHM logo.jpeg"
+    candidates = [
+        ASSETS_DIR / "HHM logo.jpeg",
+        ASSETS_DIR / "logo.jpeg",
+        ASSETS_DIR / "logo.jpg",
+        ASSETS_DIR / "logo.svg",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return ASSETS_DIR / "logo.svg"
 
 
 def utc_now_iso() -> str:
@@ -60,11 +70,6 @@ def normalize_space(value: str) -> str:
 
 def normalize_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
-
-
-def slugify(value: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
-    return slug or "episode"
 
 
 def tokenize(value: str) -> list[str]:
@@ -141,6 +146,13 @@ def strip_html(value: str) -> str:
     return normalize_space(unescape(parser.text()))
 
 
+def safe_int(value: str | None) -> int | None:
+    if value is None:
+        return None
+    match = re.search(r"\d+", str(value))
+    return int(match.group()) if match else None
+
+
 def parse_pub_date(value: str) -> tuple[str | None, str | None]:
     if not value:
         return None, None
@@ -205,94 +217,27 @@ def fetch_bytes(url: str, timeout: int = 30) -> bytes:
         return response.read()
 
 
-def extract_show_id(channel_link: str = "", rss_url: str = DEFAULT_RSS_URL) -> str:
-    for source in [channel_link, rss_url]:
-        match = re.search(r"(?:buzzsprout\.com/|feeds\.buzzsprout\.com/)(\d+)", source or "")
-        if match:
-            return match.group(1)
-    return ""
+def fetch_json(url: str, timeout: int = 30) -> dict[str, Any]:
+    return json.loads(fetch_bytes(url, timeout=timeout).decode("utf-8"))
 
 
-def extract_episode_id(*values: str) -> str:
-    for value in values:
-        match = re.search(r"(\d{6,})", value or "")
-        if match:
-            return match.group(1)
-    return ""
+def apple_title_key(value: str) -> str:
+    return normalize_key(value).replace(" scotus ", " supreme court ")
 
 
-@lru_cache(maxsize=8)
-def fetch_buzzsprout_episode_catalog(show_id: str) -> dict[str, str]:
-    if not show_id:
-        return {}
-    catalog_url = f"https://hoosierhealthmatters.buzzsprout.com/{show_id}/episodes"
-    try:
-        html = fetch_bytes(catalog_url, timeout=30).decode("utf-8", errors="ignore")
-    except Exception:
-        return {}
-
-    matches = re.findall(
-        rf"https://hoosierhealthmatters\.buzzsprout\.com/{show_id}/episodes/\d+-[a-z0-9\-]+",
-        html,
-    )
-    catalog: dict[str, str] = {}
-    for url in matches:
-        slug = url.rsplit("/", 1)[-1].split("-", 1)[1]
-        catalog[slug] = url
-    return catalog
-
-
-def lookup_catalog_episode_url(title: str, show_id: str) -> str:
-    title_slug = slugify(title)
-    catalog = fetch_buzzsprout_episode_catalog(show_id)
-    if not catalog:
-        return ""
-    if title_slug in catalog:
-        return catalog[title_slug]
-
-    title_key = normalize_key(title)
-    best_url = ""
-    best_score = 0
-    for slug, url in catalog.items():
-        slug_key = normalize_key(slug.replace("-", " "))
-        shared = len(set(title_key.split()) & set(slug_key.split()))
-        if title_slug.startswith(slug) or slug.startswith(title_slug):
-            shared += 5
-        if shared > best_score:
-            best_score = shared
-            best_url = url
-    return best_url if best_score >= 4 else ""
-
-
-def resolve_episode_url(channel_link: str, link: str, guid: str, title: str, rss_url: str = DEFAULT_RSS_URL) -> str:
-    candidates = [normalize_space(link), normalize_space(guid)]
-    for candidate in candidates:
-        if candidate.startswith("http") and "/episodes/" in candidate:
-            return candidate
-    for candidate in candidates:
-        if candidate.startswith("http") and "buzzsprout.com" in candidate:
-            return candidate
-
-    show_id = extract_show_id(channel_link, rss_url)
-    episode_id = extract_episode_id(link, guid)
-    if show_id and episode_id:
-        return f"https://hoosierhealthmatters.buzzsprout.com/{show_id}/episodes/{episode_id}-{slugify(title)}"
-    if show_id:
-        return lookup_catalog_episode_url(title, show_id)
-    return ""
-
-
-def ensure_episode_url(episode: dict[str, Any], rss_url: str = DEFAULT_RSS_URL) -> str:
-    existing = normalize_space(episode.get("episode_url") or "")
-    if existing:
-        return existing
-    return resolve_episode_url(
-        episode.get("channel_link", ""),
-        episode.get("link", ""),
-        episode.get("episode_id", ""),
-        episode.get("title", ""),
-        rss_url,
-    )
+def apple_match_score(left: str, right: str) -> int:
+    left_key = apple_title_key(left)
+    right_key = apple_title_key(right)
+    if not left_key or not right_key:
+        return 0
+    if left_key == right_key:
+        return 100
+    left_tokens = set(left_key.split())
+    right_tokens = set(right_key.split())
+    shared = len(left_tokens & right_tokens)
+    if left_key in right_key or right_key in left_key:
+        shared += 4
+    return shared
 
 
 class SearchEngine:
@@ -303,6 +248,7 @@ class SearchEngine:
         self.episodes: list[dict[str, Any]] = []
         self.chunks: list[dict[str, Any]] = []
         self.last_error: str | None = None
+        self.apple_episode_urls: dict[str, str] = {}
         self.refresh(force=False)
 
     def refresh(self, force: bool = False) -> None:
@@ -321,7 +267,6 @@ class SearchEngine:
                     if self._episode_needs_refresh(episode, cached):
                         indexed_episodes.append(self._index_episode(episode))
                     else:
-                        cached["episode_url"] = ensure_episode_url(cached, self.rss_url)
                         indexed_episodes.append(cached)
 
             self.episodes = indexed_episodes
@@ -338,8 +283,6 @@ class SearchEngine:
         except Exception as exc:
             self.last_error = f"Archive refresh failed: {exc}"
             cached_episodes = cache.get("episodes", [])
-            for episode in cached_episodes:
-                episode["episode_url"] = ensure_episode_url(episode, self.rss_url)
             self.episodes = cached_episodes
             self.chunks = [chunk for episode in self.episodes for chunk in episode.get("chunks", [])]
             self.index_manifest = cache.get(
@@ -397,8 +340,6 @@ class SearchEngine:
         episodes = cache.get("episodes", [])
         if not episodes:
             return True
-        if not any(ensure_episode_url(episode, self.rss_url) for episode in episodes):
-            return True
         for episode in episodes:
             required = ["episode_id", "title", "published", "chunks"]
             if any(not episode.get(key) for key in required):
@@ -431,8 +372,9 @@ class SearchEngine:
         channel = root.find("channel")
         if channel is None:
             return []
+        channel_title = normalize_space(channel.findtext("title", default=SHOW_TITLE)) or SHOW_TITLE
+        self.apple_episode_urls = self._load_apple_episode_urls(channel_title)
 
-        channel_link = normalize_space(channel.findtext("link", default="https://hoosierhealthmatters.buzzsprout.com/2446815"))
         ns = {
             "itunes": "http://www.itunes.com/dtds/podcast-1.0.dtd",
             "content": "http://purl.org/rss/1.0/modules/content/",
@@ -457,7 +399,6 @@ class SearchEngine:
             enclosure = item.find("enclosure")
             audio_url = enclosure.attrib.get("url", "").strip() if enclosure is not None else ""
             episode_id = guid or f"{published}-{normalize_key(title)}"
-            episode_url = resolve_episode_url(channel_link, link, guid, title, self.rss_url)
             episodes.append(
                 {
                     "episode_id": episode_id,
@@ -466,17 +407,83 @@ class SearchEngine:
                     "published_iso": published_iso,
                     "season": season,
                     "episode_number": episode_number,
-                    "episode_url": episode_url,
+                    "episode_url": self._resolve_episode_url(title, link),
                     "audio_url": audio_url,
                     "description": description,
                     "summary_text": normalize_space(" ".join(part for part in [subtitle, description, content_text] if part)),
                     "transcript_text": transcript_text,
-                    "channel_link": channel_link,
-                    "link": link,
                 }
             )
         episodes.sort(key=lambda episode: episode.get("published") or "", reverse=True)
         return episodes
+
+    def _load_apple_episode_urls(self, show_title: str) -> dict[str, str]:
+        search_params = urllib.parse.urlencode(
+            {
+                "term": show_title,
+                "media": "podcast",
+                "entity": "podcast",
+                "limit": 10,
+            }
+        )
+        search_url = f"https://itunes.apple.com/search?{search_params}"
+        try:
+            search_payload = fetch_json(search_url, timeout=20)
+        except Exception:
+            return {}
+
+        collection = None
+        show_key = apple_title_key(show_title)
+        for result in search_payload.get("results", []):
+            collection_name = normalize_space(result.get("collectionName", ""))
+            if apple_title_key(collection_name) == show_key:
+                collection = result
+                break
+        if collection is None and search_payload.get("results"):
+            collection = search_payload["results"][0]
+        if collection is None:
+            return {}
+
+        collection_id = collection.get("collectionId")
+        if not collection_id:
+            return {}
+
+        lookup_params = urllib.parse.urlencode(
+            {
+                "id": collection_id,
+                "entity": "podcastEpisode",
+                "limit": 200,
+            }
+        )
+        lookup_url = f"https://itunes.apple.com/lookup?{lookup_params}"
+        try:
+            lookup_payload = fetch_json(lookup_url, timeout=20)
+        except Exception:
+            return {}
+
+        episode_urls: dict[str, str] = {}
+        for result in lookup_payload.get("results", []):
+            wrapper_type = result.get("wrapperType", "")
+            kind = result.get("kind", "")
+            if wrapper_type != "podcastEpisode" and kind != "podcast-episode":
+                continue
+            episode_title = normalize_space(result.get("trackName", ""))
+            episode_url = result.get("episodeUrl") or result.get("trackViewUrl") or ""
+            if episode_title and episode_url.startswith("http"):
+                episode_urls.setdefault(episode_title, episode_url)
+        return episode_urls
+
+    def _resolve_episode_url(self, title: str, rss_link: str) -> str:
+        if rss_link.startswith("http"):
+            return rss_link
+        best_url = ""
+        best_score = 0
+        for apple_title, apple_url in self.apple_episode_urls.items():
+            score = apple_match_score(title, apple_title)
+            if score > best_score:
+                best_score = score
+                best_url = apple_url
+        return best_url if best_score >= 4 else ""
 
     def _extract_transcript_from_item(self, item: ET.Element, ns: dict[str, str]) -> str:
         transcript_candidates: list[str] = []
@@ -518,7 +525,6 @@ class SearchEngine:
             if chunk_embedding:
                 embeddings.append(chunk_embedding)
 
-        episode["episode_url"] = ensure_episode_url(episode, self.rss_url)
         episode["transcript_text"] = transcript_text
         episode["transcript_source"] = transcript_source
         episode["chunks"] = chunks
@@ -612,7 +618,6 @@ class SearchEngine:
                 if intent.get("episode_number") and episode.get("episode_number") != intent["episode_number"]:
                     continue
                 episode_copy = dict(episode)
-                episode_copy["episode_url"] = ensure_episode_url(episode_copy, self.rss_url)
                 episode_copy["score"] = 10.0
                 episode_copy["match_reason"] = "Exact season and episode match"
                 exact_matches.append(episode_copy)
@@ -655,7 +660,6 @@ class SearchEngine:
 
             if score > 0:
                 episode_copy = dict(episode)
-                episode_copy["episode_url"] = ensure_episode_url(episode_copy, self.rss_url)
                 episode_copy["score"] = score
                 episode_copy["match_reason"] = reasons[0] if reasons else "Relevant topic match"
                 scored.append(episode_copy)
@@ -697,14 +701,14 @@ class SearchEngine:
     ) -> str:
         if not episodes:
             return (
-                "I couldn't find a supported answer in the indexed archive. Try a different guest name, topic, or season and episode reference."
+                "I couldn’t find a supported answer in the indexed archive. Try a different guest name, topic, or season and episode reference."
             )
 
         if not self.client:
             return self._fallback_answer(query, intent, episodes, chunks)
         if intent["intent"] == "topic_search" and not chunks:
             return (
-                "I found possibly relevant episodes, but I don't have enough retrieved excerpt text to answer that topic safely."
+                "I found possibly relevant episodes, but I don’t have enough retrieved excerpt text to answer that topic safely."
             )
 
         context_lines = []
@@ -757,4 +761,4 @@ class SearchEngine:
         if chunks:
             summary = chunks[0]["chunk_text"]
             return f"{label} appears most relevant. Based on the retrieved excerpt: {summary}"
-        return f"{label} appears to be the closest archive match for '{query}'."
+        return f"{label} appears to be the closest archive match for “{query}.”"
