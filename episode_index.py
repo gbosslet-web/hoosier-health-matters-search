@@ -204,26 +204,49 @@ def fetch_bytes(url: str, timeout: int = 30) -> bytes:
         return response.read()
 
 
-def resolve_episode_url(channel_link: str, link: str, guid: str, title: str) -> str:
+def extract_show_id(channel_link: str = "", rss_url: str = DEFAULT_RSS_URL) -> str:
+    for source in [channel_link, rss_url]:
+        match = re.search(r"(?:buzzsprout\.com/|feeds\.buzzsprout\.com/)(\d+)", source or "")
+        if match:
+            return match.group(1)
+    return ""
+
+
+def extract_episode_id(*values: str) -> str:
+    for value in values:
+        match = re.search(r"(\d{6,})", value or "")
+        if match:
+            return match.group(1)
+    return ""
+
+
+def resolve_episode_url(channel_link: str, link: str, guid: str, title: str, rss_url: str = DEFAULT_RSS_URL) -> str:
     candidates = [normalize_space(link), normalize_space(guid)]
     for candidate in candidates:
         if candidate.startswith("http") and "/episodes/" in candidate:
             return candidate
     for candidate in candidates:
-        if candidate.startswith("http"):
+        if candidate.startswith("http") and "buzzsprout.com" in candidate:
             return candidate
 
-    channel_link = normalize_space(channel_link)
-    if "buzzsprout.com" not in channel_link:
-        return ""
-
-    show_match = re.search(r"buzzsprout\.com/(\d+)", channel_link)
-    episode_match = re.search(r"(\d{6,})", guid)
-    if show_match and episode_match:
-        show_id = show_match.group(1)
-        episode_id = episode_match.group(1)
+    show_id = extract_show_id(channel_link, rss_url)
+    episode_id = extract_episode_id(link, guid)
+    if show_id and episode_id:
         return f"https://hoosierhealthmatters.buzzsprout.com/{show_id}/episodes/{episode_id}-{slugify(title)}"
     return ""
+
+
+def ensure_episode_url(episode: dict[str, Any], rss_url: str = DEFAULT_RSS_URL) -> str:
+    existing = normalize_space(episode.get("episode_url") or "")
+    if existing:
+        return existing
+    return resolve_episode_url(
+        episode.get("channel_link", ""),
+        episode.get("link", ""),
+        episode.get("episode_id", ""),
+        episode.get("title", ""),
+        rss_url,
+    )
 
 
 class SearchEngine:
@@ -252,6 +275,7 @@ class SearchEngine:
                     if self._episode_needs_refresh(episode, cached):
                         indexed_episodes.append(self._index_episode(episode))
                     else:
+                        cached["episode_url"] = ensure_episode_url(cached, self.rss_url)
                         indexed_episodes.append(cached)
 
             self.episodes = indexed_episodes
@@ -268,6 +292,8 @@ class SearchEngine:
         except Exception as exc:
             self.last_error = f"Archive refresh failed: {exc}"
             cached_episodes = cache.get("episodes", [])
+            for episode in cached_episodes:
+                episode["episode_url"] = ensure_episode_url(episode, self.rss_url)
             self.episodes = cached_episodes
             self.chunks = [chunk for episode in self.episodes for chunk in episode.get("chunks", [])]
             self.index_manifest = cache.get(
@@ -325,7 +351,7 @@ class SearchEngine:
         episodes = cache.get("episodes", [])
         if not episodes:
             return True
-        if not any(episode.get("episode_url") for episode in episodes):
+        if not any(ensure_episode_url(episode, self.rss_url) for episode in episodes):
             return True
         for episode in episodes:
             required = ["episode_id", "title", "published", "chunks"]
@@ -385,7 +411,7 @@ class SearchEngine:
             enclosure = item.find("enclosure")
             audio_url = enclosure.attrib.get("url", "").strip() if enclosure is not None else ""
             episode_id = guid or f"{published}-{normalize_key(title)}"
-            episode_url = resolve_episode_url(channel_link, link, guid, title)
+            episode_url = resolve_episode_url(channel_link, link, guid, title, self.rss_url)
             episodes.append(
                 {
                     "episode_id": episode_id,
@@ -399,6 +425,8 @@ class SearchEngine:
                     "description": description,
                     "summary_text": normalize_space(" ".join(part for part in [subtitle, description, content_text] if part)),
                     "transcript_text": transcript_text,
+                    "channel_link": channel_link,
+                    "link": link,
                 }
             )
         episodes.sort(key=lambda episode: episode.get("published") or "", reverse=True)
@@ -444,6 +472,7 @@ class SearchEngine:
             if chunk_embedding:
                 embeddings.append(chunk_embedding)
 
+        episode["episode_url"] = ensure_episode_url(episode, self.rss_url)
         episode["transcript_text"] = transcript_text
         episode["transcript_source"] = transcript_source
         episode["chunks"] = chunks
@@ -537,6 +566,7 @@ class SearchEngine:
                 if intent.get("episode_number") and episode.get("episode_number") != intent["episode_number"]:
                     continue
                 episode_copy = dict(episode)
+                episode_copy["episode_url"] = ensure_episode_url(episode_copy, self.rss_url)
                 episode_copy["score"] = 10.0
                 episode_copy["match_reason"] = "Exact season and episode match"
                 exact_matches.append(episode_copy)
@@ -579,6 +609,7 @@ class SearchEngine:
 
             if score > 0:
                 episode_copy = dict(episode)
+                episode_copy["episode_url"] = ensure_episode_url(episode_copy, self.rss_url)
                 episode_copy["score"] = score
                 episode_copy["match_reason"] = reasons[0] if reasons else "Relevant topic match"
                 scored.append(episode_copy)
@@ -680,4 +711,4 @@ class SearchEngine:
         if chunks:
             summary = chunks[0]["chunk_text"]
             return f"{label} appears most relevant. Based on the retrieved excerpt: {summary}"
-        return f"{label} appears to be the closest archive match for “{query}.”"
+        return f"{label} appears to be the closest archive match for “{query}."
