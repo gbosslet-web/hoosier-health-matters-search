@@ -1,13 +1,17 @@
-from pathlib import Path
-
 import streamlit as st
 
-from episode_index import OPENAI_CONFIGURED, SearchEngine, format_episode_label, get_logo_path
+from episode_index import (
+    DEFAULT_RSS_URL,
+    OPENAI_CONFIGURED,
+    SearchEngine,
+    format_episode_label,
+    get_logo_path,
+)
 
 
 st.set_page_config(
     page_title="Hoosier Health Matters Episode Search",
-    page_icon="🎙️",
+    page_icon=str(get_logo_path()),
     layout="centered",
 )
 
@@ -65,6 +69,12 @@ def render_styles() -> None:
             margin-bottom: 1.4rem;
         }
 
+        .hero-logo {
+            display: flex;
+            justify-content: center;
+            margin-bottom: 1rem;
+        }
+
         .hero-title {
             color: var(--text);
             font-size: clamp(2rem, 3vw, 2.8rem);
@@ -88,6 +98,7 @@ def render_styles() -> None:
             box-shadow: var(--shadow);
             backdrop-filter: blur(14px);
             padding: 1.35rem 1.35rem 1.15rem 1.35rem;
+            margin-bottom: 1rem;
         }
 
         .section-title {
@@ -96,6 +107,29 @@ def render_styles() -> None:
             font-weight: 700;
             margin-bottom: 0.9rem;
             letter-spacing: -0.02em;
+        }
+
+        .episode-card {
+            background: var(--surface-strong);
+            border: 1px solid var(--border);
+            border-radius: 18px;
+            padding: 1rem 1rem 0.9rem 1rem;
+            margin-bottom: 0.85rem;
+            box-shadow: 0 8px 24px rgba(15, 23, 42, 0.07);
+        }
+
+        .episode-card-title {
+            color: var(--text);
+            font-size: 1.03rem;
+            font-weight: 800;
+            line-height: 1.5;
+            margin-bottom: 0.3rem;
+        }
+
+        .episode-meta {
+            color: var(--muted);
+            font-size: 0.92rem;
+            margin-top: 0.2rem;
         }
 
         .answer-copy {
@@ -122,17 +156,6 @@ def render_styles() -> None:
             margin-top: 0.4rem;
         }
 
-        .episode-list {
-            margin-top: 0.5rem;
-        }
-
-        .episode-meta {
-            color: var(--muted);
-            font-size: 0.92rem;
-            margin-top: 0.15rem;
-            margin-bottom: 0.65rem;
-        }
-
         div[data-testid="stTextInputRootElement"] > div {
             border-radius: 18px;
         }
@@ -147,68 +170,33 @@ def get_engine() -> SearchEngine:
     return SearchEngine()
 
 
-def render_logo() -> None:
-    logo_path = get_logo_path()
-    try:
-        image_bytes = Path(logo_path).read_bytes()
-        st.image(image_bytes, width=108)
-    except Exception:
-        st.markdown(
-            '<div style="font-size:3rem; line-height:1; margin-bottom:0.35rem;">🎙️</div>',
-            unsafe_allow_html=True,
-        )
-
-
 def render_episode_list(episodes: list[dict]) -> None:
-    st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.markdown('<div class="section-title">Matched episode(s)</div>', unsafe_allow_html=True)
-    st.markdown('</div>', unsafe_allow_html=True)
-
     if not episodes:
-        st.info("No matching episodes were found in the indexed archive.")
+        st.markdown('<div class="card"><div class="section-title">Matched episode(s)</div><div class="answer-copy">No matching episodes were found in the indexed archive.</div></div>', unsafe_allow_html=True)
         return
 
-    st.markdown('<div class="episode-list">', unsafe_allow_html=True)
-    for episode in episodes:
+    st.markdown('<div class="card"><div class="section-title">Matched episode(s)</div></div>', unsafe_allow_html=True)
+    for index, episode in enumerate(episodes):
         label = format_episode_label(episode)
         meta = []
         if episode.get("published"):
             meta.append(episode["published"])
         if episode.get("match_reason"):
             meta.append(episode["match_reason"])
-
-        safe_label = label.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        if episode.get("episode_url"):
-            safe_url = episode["episode_url"].replace('"', "%22")
-            st.markdown(
-                (
-                    '<div style="margin-bottom:0.2rem; line-height:1.5;">'
-                    f'<a href="{safe_url}" target="_blank" '
-                    'style="color:#67e8f9 !important; text-decoration:underline !important; '
-                    'text-decoration-thickness:2px !important; text-underline-offset:0.18em !important; '
-                    'font-size:1.02rem !important; font-weight:700 !important;">'
-                    f'{safe_label}</a></div>'
-                ),
-                unsafe_allow_html=True,
-            )
-            st.markdown(
-                (
-                    '<div style="margin-bottom:0.3rem;">'
-                    f'<a href="{safe_url}" target="_blank" '
-                    'style="color:#a5f3fc !important; font-size:0.95rem !important; '
-                    'font-weight:600 !important; text-decoration:none !important;">Open episode ↗</a></div>'
-                ),
-                unsafe_allow_html=True,
-            )
-        else:
-            st.markdown(
-                f'<div style="color:#e5eef8; font-size:1.02rem; font-weight:700; line-height:1.5; margin-bottom:0.2rem;">{safe_label}</div>',
-                unsafe_allow_html=True,
-            )
+        st.markdown(
+            f'<div class="episode-card"><div class="episode-card-title">{label}</div>',
+            unsafe_allow_html=True,
+        )
         if meta:
-            st.markdown(f'<div class="episode-meta">{" • ".join(meta)}</div>', unsafe_allow_html=True)
-        st.divider()
-    st.markdown('</div>', unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="episode-meta">{" • ".join(meta)}</div>',
+                unsafe_allow_html=True,
+            )
+        st.markdown("</div>", unsafe_allow_html=True)
+        if episode.get("episode_url"):
+            st.link_button("Open episode", episode["episode_url"])
+        if index < len(episodes) - 1:
+            st.divider()
 
 
 def render_answer(answer: str) -> None:
@@ -261,7 +249,7 @@ def main() -> None:
     render_sidebar(engine)
 
     st.markdown('<div class="hero-shell">', unsafe_allow_html=True)
-    render_logo()
+    st.image(str(get_logo_path()), width=108)
     st.markdown(
         '<div class="hero-title">Hoosier Health Matters Episode Search</div>',
         unsafe_allow_html=True,
@@ -274,7 +262,7 @@ def main() -> None:
 
     query = st.text_input(
         "Search the archive",
-        placeholder="Ask about a guest, a topic, or a season and episode number...",
+        placeholder="Ask about a guest, a topic, or a season and episode number…",
         label_visibility="collapsed",
     )
     st.markdown(
