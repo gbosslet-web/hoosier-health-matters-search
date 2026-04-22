@@ -24,7 +24,7 @@ DATA_DIR = BASE_DIR / "data"
 CACHE_PATH = DATA_DIR / "archive_index.json"
 ASSETS_DIR = BASE_DIR / "assets"
 DEFAULT_RSS_URL = os.getenv("HHM_RSS_URL", "https://feeds.buzzsprout.com/2446815.rss")
-CACHE_VERSION = 5
+CACHE_VERSION = 6
 EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 ANSWER_MODEL = os.getenv("OPENAI_RESPONSE_MODEL", "gpt-4.1-mini")
 TRANSCRIPTION_MODEL = os.getenv("OPENAI_TRANSCRIPTION_MODEL", "gpt-4o-mini-transcribe")
@@ -287,6 +287,15 @@ def fetch_bytes(url: str, timeout: int = 30) -> bytes:
 
 def fetch_json(url: str, timeout: int = 30) -> dict[str, Any]:
     return json.loads(fetch_bytes(url, timeout=timeout).decode("utf-8"))
+
+
+def derive_buzzsprout_episode_url_from_audio(audio_url: str) -> str:
+    if not audio_url.startswith("http"):
+        return ""
+    match = re.search(r"(https://www\.buzzsprout\.com/\d+/episodes/\d+-[^/?#]+)\.mp3(?:$|[?#])", audio_url)
+    if not match:
+        return ""
+    return match.group(1)
 
 
 def apple_title_key(value: str) -> str:
@@ -553,6 +562,7 @@ class SearchEngine:
             enclosure = item.find("enclosure")
             audio_url = enclosure.attrib.get("url", "").strip() if enclosure is not None else ""
             episode_id = guid or f"{published}-{normalize_key(title)}"
+            derived_episode_url = derive_buzzsprout_episode_url_from_audio(audio_url)
             episodes.append(
                 {
                     "episode_id": episode_id,
@@ -561,7 +571,7 @@ class SearchEngine:
                     "published_iso": published_iso,
                     "season": season,
                     "episode_number": episode_number,
-                    "episode_url": self._resolve_episode_url(title, link, SHOW_TITLE),
+                    "episode_url": self._resolve_episode_url(title, link, audio_url, SHOW_TITLE) or derived_episode_url,
                     "audio_url": audio_url,
                     "description": description,
                     "summary_text": normalize_space(" ".join(part for part in [subtitle, description, content_text] if part)),
@@ -571,9 +581,12 @@ class SearchEngine:
         episodes.sort(key=lambda episode: episode.get("published") or "", reverse=True)
         return episodes
 
-    def _resolve_episode_url(self, title: str, rss_link: str, show_title: str) -> str:
+    def _resolve_episode_url(self, title: str, rss_link: str, audio_url: str, show_title: str) -> str:
         if rss_link.startswith("http"):
             return rss_link
+        derived_audio_url = derive_buzzsprout_episode_url_from_audio(audio_url)
+        if derived_audio_url:
+            return derived_audio_url
         buzzsprout_url = lookup_buzzsprout_episode_url(title)
         if buzzsprout_url:
             return buzzsprout_url
