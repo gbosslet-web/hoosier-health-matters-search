@@ -1,3 +1,5 @@
+from html import escape
+
 import streamlit as st
 
 from episode_index import (
@@ -132,6 +134,24 @@ def render_styles() -> None:
             margin-top: 0.35rem;
         }
 
+        .episode-excerpt {
+            color: var(--text);
+            font-size: 0.97rem;
+            line-height: 1.65;
+            margin-top: 0.7rem;
+        }
+
+        .episode-stamp {
+            display: inline-block;
+            color: var(--accent);
+            background: var(--accent-soft);
+            border-radius: 999px;
+            padding: 0.18rem 0.55rem;
+            font-size: 0.8rem;
+            font-weight: 700;
+            margin: 0.55rem 0 0.15rem 0;
+        }
+
         .result-section-title {
             color: var(--text);
             font-size: 1rem;
@@ -196,14 +216,30 @@ def render_episode_list(episodes: list[dict]) -> None:
         if episode.get("match_reason"):
             meta.append(episode["match_reason"])
         with st.container():
+            safe_label = escape(label)
             st.markdown('<div class="episode-card">', unsafe_allow_html=True)
             st.markdown(
-                f'<div class="episode-card-title">{label}</div>',
+                f'<div class="episode-card-title">{safe_label}</div>',
                 unsafe_allow_html=True,
             )
             if meta:
+                safe_meta = escape(" • ".join(meta))
                 st.markdown(
-                    f'<div class="episode-meta">{" • ".join(meta)}</div>',
+                    f'<div class="episode-meta">{safe_meta}</div>',
+                    unsafe_allow_html=True,
+                )
+            if episode.get("discussion_timestamp"):
+                stamp_label = escape(episode["discussion_timestamp"])
+                if episode.get("discussion_timestamp_approx"):
+                    stamp_label = f"Around {stamp_label}"
+                st.markdown(
+                    f'<div class="episode-stamp">{stamp_label}</div>',
+                    unsafe_allow_html=True,
+                )
+            if episode.get("discussion_excerpt"):
+                safe_excerpt = escape(episode["discussion_excerpt"])
+                st.markdown(
+                    f'<div class="episode-excerpt">{safe_excerpt}</div>',
                     unsafe_allow_html=True,
                 )
             if episode.get("episode_url"):
