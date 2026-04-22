@@ -113,8 +113,8 @@ def render_styles() -> None:
             background: var(--surface-strong);
             border: 1px solid var(--border);
             border-radius: 18px;
-            padding: 1rem 1rem 0.9rem 1rem;
-            margin-bottom: 0.85rem;
+            padding: 1rem 1rem 0.95rem 1rem;
+            margin-bottom: 0.75rem;
             box-shadow: 0 8px 24px rgba(15, 23, 42, 0.07);
         }
 
@@ -129,7 +129,15 @@ def render_styles() -> None:
         .episode-meta {
             color: var(--muted);
             font-size: 0.92rem;
-            margin-top: 0.2rem;
+            margin-top: 0.35rem;
+        }
+
+        .result-section-title {
+            color: var(--text);
+            font-size: 1rem;
+            font-weight: 800;
+            margin: 1.25rem 0 0.7rem 0;
+            letter-spacing: -0.02em;
         }
 
         .answer-copy {
@@ -172,31 +180,35 @@ def get_engine() -> SearchEngine:
 
 def render_episode_list(episodes: list[dict]) -> None:
     if not episodes:
-        st.markdown('<div class="card"><div class="section-title">Matched episode(s)</div><div class="answer-copy">No matching episodes were found in the indexed archive.</div></div>', unsafe_allow_html=True)
+        st.markdown('<div class="result-section-title">Matched episode(s)</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="card"><div class="answer-copy">No matching episodes were found in the indexed archive.</div></div>',
+            unsafe_allow_html=True,
+        )
         return
 
-    st.markdown('<div class="card"><div class="section-title">Matched episode(s)</div></div>', unsafe_allow_html=True)
-    for index, episode in enumerate(episodes):
+    st.markdown('<div class="result-section-title">Matched episode(s)</div>', unsafe_allow_html=True)
+    for episode in episodes:
         label = format_episode_label(episode)
         meta = []
         if episode.get("published"):
             meta.append(episode["published"])
         if episode.get("match_reason"):
             meta.append(episode["match_reason"])
-        st.markdown(
-            f'<div class="episode-card"><div class="episode-card-title">{label}</div>',
-            unsafe_allow_html=True,
-        )
-        if meta:
+        with st.container():
+            st.markdown('<div class="episode-card">', unsafe_allow_html=True)
             st.markdown(
-                f'<div class="episode-meta">{" • ".join(meta)}</div>',
+                f'<div class="episode-card-title">{label}</div>',
                 unsafe_allow_html=True,
             )
-        st.markdown("</div>", unsafe_allow_html=True)
-        if episode.get("episode_url"):
-            st.link_button("Open episode", episode["episode_url"])
-        if index < len(episodes) - 1:
-            st.divider()
+            if meta:
+                st.markdown(
+                    f'<div class="episode-meta">{" • ".join(meta)}</div>',
+                    unsafe_allow_html=True,
+                )
+            if episode.get("episode_url"):
+                st.link_button("Open episode", episode["episode_url"])
+            st.markdown("</div>", unsafe_allow_html=True)
 
 
 def render_answer(answer: str) -> None:
