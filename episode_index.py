@@ -9,6 +9,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from functools import lru_cache
 from html import unescape
 from html.parser import HTMLParser
 from pathlib import Path
@@ -220,6 +221,49 @@ def extract_episode_id(*values: str) -> str:
     return ""
 
 
+@lru_cache(maxsize=8)
+def fetch_buzzsprout_episode_catalog(show_id: str) -> dict[str, str]:
+    if not show_id:
+        return {}
+    catalog_url = f"https://hoosierhealthmatters.buzzsprout.com/{show_id}/episodes"
+    try:
+        html = fetch_bytes(catalog_url, timeout=30).decode("utf-8", errors="ignore")
+    except Exception:
+        return {}
+
+    matches = re.findall(
+        rf"https://hoosierhealthmatters\.buzzsprout\.com/{show_id}/episodes/\d+-[a-z0-9\-]+",
+        html,
+    )
+    catalog: dict[str, str] = {}
+    for url in matches:
+        slug = url.rsplit("/", 1)[-1].split("-", 1)[1]
+        catalog[slug] = url
+    return catalog
+
+
+def lookup_catalog_episode_url(title: str, show_id: str) -> str:
+    title_slug = slugify(title)
+    catalog = fetch_buzzsprout_episode_catalog(show_id)
+    if not catalog:
+        return ""
+    if title_slug in catalog:
+        return catalog[title_slug]
+
+    title_key = normalize_key(title)
+    best_url = ""
+    best_score = 0
+    for slug, url in catalog.items():
+        slug_key = normalize_key(slug.replace("-", " "))
+        shared = len(set(title_key.split()) & set(slug_key.split()))
+        if title_slug.startswith(slug) or slug.startswith(title_slug):
+            shared += 5
+        if shared > best_score:
+            best_score = shared
+            best_url = url
+    return best_url if best_score >= 4 else ""
+
+
 def resolve_episode_url(channel_link: str, link: str, guid: str, title: str, rss_url: str = DEFAULT_RSS_URL) -> str:
     candidates = [normalize_space(link), normalize_space(guid)]
     for candidate in candidates:
@@ -233,6 +277,8 @@ def resolve_episode_url(channel_link: str, link: str, guid: str, title: str, rss
     episode_id = extract_episode_id(link, guid)
     if show_id and episode_id:
         return f"https://hoosierhealthmatters.buzzsprout.com/{show_id}/episodes/{episode_id}-{slugify(title)}"
+    if show_id:
+        return lookup_catalog_episode_url(title, show_id)
     return ""
 
 
