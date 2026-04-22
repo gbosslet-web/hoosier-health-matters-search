@@ -98,21 +98,20 @@ def render_styles() -> None:
             letter-spacing: -0.02em;
         }
 
-        .episode-pill {
-            display: block;
+        .episode-card {
             background: var(--surface-strong);
             border: 1px solid var(--border);
             border-radius: 18px;
             padding: 0.95rem 1rem;
             margin-bottom: 0.75rem;
-            color: var(--text);
-            text-decoration: none;
             box-shadow: 0 8px 24px rgba(15, 23, 42, 0.07);
         }
 
-        .episode-pill:hover {
-            border-color: rgba(15, 118, 110, 0.45);
-            transform: translateY(-1px);
+        .episode-label {
+            color: var(--text);
+            font-weight: 700;
+            font-size: 1rem;
+            margin-bottom: 0.25rem;
         }
 
         .episode-meta {
@@ -186,18 +185,13 @@ def render_episode_list(episodes: list[dict]) -> None:
             meta.append(episode["published"])
         if episode.get("match_reason"):
             meta.append(episode["match_reason"])
-        meta_html = f'<div class="episode-meta">{" • ".join(meta)}</div>' if meta else ""
+        st.markdown('<div class="episode-card">', unsafe_allow_html=True)
+        st.markdown(f'<div class="episode-label">{label}</div>', unsafe_allow_html=True)
+        if meta:
+            st.markdown(f'<div class="episode-meta">{" • ".join(meta)}</div>', unsafe_allow_html=True)
         if episode.get("episode_url"):
-            st.markdown(
-                f'<a class="episode-pill" href="{episode["episode_url"]}" target="_blank">'
-                f"<strong>{label}</strong>{meta_html}</a>",
-                unsafe_allow_html=True,
-            )
-        else:
-            st.markdown(
-                f'<div class="episode-pill"><strong>{label}</strong>{meta_html}</div>',
-                unsafe_allow_html=True,
-            )
+            st.link_button("Open episode", episode["episode_url"], use_container_width=False)
+        st.markdown('</div>', unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
 
 
