@@ -33,6 +33,10 @@ DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 }
 SHOW_TITLE = "Hoosier Health Matters"
+APPLE_SHOW_URL = os.getenv(
+    "HHM_APPLE_SHOW_URL",
+    "https://podcasts.apple.com/us/podcast/hoosier-health-matters/id1793605849",
+)
 
 
 class PlainTextHTMLParser(HTMLParser):
@@ -46,6 +50,35 @@ class PlainTextHTMLParser(HTMLParser):
 
     def text(self) -> str:
         return " ".join(self.parts)
+
+
+class AppleEpisodeLinkParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.links: list[tuple[str, str]] = []
+        self._active_href: str | None = None
+        self._active_parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag != "a":
+            return
+        href = dict(attrs).get("href") or ""
+        if "/podcast/" in href and "?i=" in href:
+            self._active_href = href
+            self._active_parts = []
+
+    def handle_data(self, data: str) -> None:
+        if self._active_href and data.strip():
+            self._active_parts.append(data.strip())
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag != "a" or not self._active_href:
+            return
+        text = normalize_space(" ".join(self._active_parts))
+        if text:
+            self.links.append((self._active_href, text))
+        self._active_href = None
+        self._active_parts = []
 
 
 def get_logo_path() -> Path:
@@ -278,6 +311,29 @@ def lookup_apple_episode_url(show_title: str, episode_title: str) -> str:
     return best_url if best_score >= 6 else ""
 
 
+@lru_cache(maxsize=1)
+def fetch_apple_show_page_links() -> list[tuple[str, str]]:
+    try:
+        html = fetch_bytes(APPLE_SHOW_URL, timeout=20).decode("utf-8", errors="ignore")
+    except Exception:
+        return []
+
+    parser = AppleEpisodeLinkParser()
+    parser.feed(html)
+    return parser.links
+
+
+def lookup_apple_show_page_episode_url(episode_title: str) -> str:
+    best_url = ""
+    best_score = 0
+    for url, link_text in fetch_apple_show_page_links():
+        score = apple_match_score(episode_title, link_text)
+        if score > best_score:
+            best_score = score
+            best_url = url
+    return best_url if best_score >= 6 else ""
+
+
 class SearchEngine:
     def __init__(self, rss_url: str = DEFAULT_RSS_URL) -> None:
         self.rss_url = rss_url
@@ -457,7 +513,10 @@ class SearchEngine:
     def _resolve_episode_url(self, title: str, rss_link: str, show_title: str) -> str:
         if rss_link.startswith("http"):
             return rss_link
-        return lookup_apple_episode_url(show_title, title)
+        apple_url = lookup_apple_episode_url(show_title, title)
+        if apple_url:
+            return apple_url
+        return lookup_apple_show_page_episode_url(title)
 
     def _extract_transcript_from_item(self, item: ET.Element, ns: dict[str, str]) -> str:
         transcript_candidates: list[str] = []
@@ -735,4 +794,4 @@ class SearchEngine:
         if chunks:
             summary = chunks[0]["chunk_text"]
             return f"{label} appears most relevant. Based on the retrieved excerpt: {summary}"
-        return f"{label} appears to be the closest archive match for “{query}.”"
+        return f"{label} appears to be the closest archive match for “{query}."
