@@ -22,7 +22,7 @@ DATA_DIR = BASE_DIR / "data"
 CACHE_PATH = DATA_DIR / "archive_index.json"
 ASSETS_DIR = BASE_DIR / "assets"
 DEFAULT_RSS_URL = os.getenv("HHM_RSS_URL", "https://feeds.buzzsprout.com/2446815.rss")
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 ANSWER_MODEL = os.getenv("OPENAI_RESPONSE_MODEL", "gpt-4.1-mini")
 TRANSCRIPTION_MODEL = os.getenv("OPENAI_TRANSCRIPTION_MODEL", "gpt-4o-mini-transcribe")
@@ -324,6 +324,8 @@ class SearchEngine:
             return True
         episodes = cache.get("episodes", [])
         if not episodes:
+            return True
+        if not any(episode.get("episode_url") for episode in episodes):
             return True
         for episode in episodes:
             required = ["episode_id", "title", "published", "chunks"]
@@ -678,4 +680,4 @@ class SearchEngine:
         if chunks:
             summary = chunks[0]["chunk_text"]
             return f"{label} appears most relevant. Based on the retrieved excerpt: {summary}"
-        return f"{label} appears to be the closest archive match for “{query}."
+        return f"{label} appears to be the closest archive match for “{query}.”"
