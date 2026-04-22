@@ -24,6 +24,7 @@ def render_styles() -> None:
             --muted: #475569;
             --accent: #0f766e;
             --accent-soft: rgba(15, 118, 110, 0.12);
+            --link: #0f766e;
             --shadow: 0 18px 45px rgba(15, 23, 42, 0.12);
         }
 
@@ -36,6 +37,7 @@ def render_styles() -> None:
                 --muted: #c5d3e1;
                 --accent: #5eead4;
                 --accent-soft: rgba(94, 234, 212, 0.12);
+                --link: #7dd3fc;
                 --shadow: 0 18px 45px rgba(2, 6, 23, 0.45);
             }
         }
@@ -126,6 +128,24 @@ def render_styles() -> None:
             margin-top: 0.5rem;
         }
 
+        .episode-title {
+            font-size: 1.02rem;
+            font-weight: 700;
+            line-height: 1.5;
+            margin-bottom: 0.15rem;
+        }
+
+        .episode-title a {
+            color: var(--link) !important;
+            text-decoration: underline !important;
+            text-decoration-thickness: 2px !important;
+            text-underline-offset: 0.18em !important;
+        }
+
+        .episode-title a:hover {
+            filter: brightness(1.08);
+        }
+
         .episode-meta {
             color: var(--muted);
             font-size: 0.92rem;
@@ -169,7 +189,7 @@ def render_episode_list(episodes: list[dict]) -> None:
         return
 
     st.markdown('<div class="episode-list">', unsafe_allow_html=True)
-    for index, episode in enumerate(episodes):
+    for episode in episodes:
         label = format_episode_label(episode)
         meta = []
         if episode.get("published"):
@@ -177,15 +197,22 @@ def render_episode_list(episodes: list[dict]) -> None:
         if episode.get("match_reason"):
             meta.append(episode["match_reason"])
 
-        with st.container():
-            if episode.get("episode_url"):
-                st.markdown(f"**[{label}]({episode['episode_url']})**")
-                st.link_button("Open episode", episode["episode_url"], key=f"episode-link-{index}")
-            else:
-                st.markdown(f"**{label}**")
-            if meta:
-                st.markdown(f'<div class="episode-meta">{" • ".join(meta)}</div>', unsafe_allow_html=True)
-            st.divider()
+        if episode.get("episode_url"):
+            safe_label = (
+                label.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+            )
+            safe_url = episode["episode_url"].replace('"', "%22")
+            st.markdown(
+                f'<div class="episode-title"><a href="{safe_url}" target="_blank">{safe_label}</a></div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(f'<div class="episode-title">{label}</div>', unsafe_allow_html=True)
+        if meta:
+            st.markdown(f'<div class="episode-meta">{" • ".join(meta)}</div>', unsafe_allow_html=True)
+        st.divider()
     st.markdown('</div>', unsafe_allow_html=True)
 
 
