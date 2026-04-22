@@ -14,6 +14,7 @@ from html import unescape
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
+from functools import lru_cache
 
 from openai import OpenAI
 
@@ -23,7 +24,7 @@ DATA_DIR = BASE_DIR / "data"
 CACHE_PATH = DATA_DIR / "archive_index.json"
 ASSETS_DIR = BASE_DIR / "assets"
 DEFAULT_RSS_URL = os.getenv("HHM_RSS_URL", "https://feeds.buzzsprout.com/2446815.rss")
-CACHE_VERSION = 2
+CACHE_VERSION = 3
 EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 ANSWER_MODEL = os.getenv("OPENAI_RESPONSE_MODEL", "gpt-4.1-mini")
 TRANSCRIPTION_MODEL = os.getenv("OPENAI_TRANSCRIPTION_MODEL", "gpt-4o-mini-transcribe")
@@ -240,6 +241,43 @@ def apple_match_score(left: str, right: str) -> int:
     return shared
 
 
+@lru_cache(maxsize=256)
+def lookup_apple_episode_url(show_title: str, episode_title: str) -> str:
+    search_term = f"{show_title} {episode_title}"
+    search_params = urllib.parse.urlencode(
+        {
+            "term": search_term,
+            "media": "podcast",
+            "entity": "podcastEpisode",
+            "limit": 25,
+        }
+    )
+    search_url = f"https://itunes.apple.com/search?{search_params}"
+    try:
+        search_payload = fetch_json(search_url, timeout=20)
+    except Exception:
+        return ""
+
+    best_url = ""
+    best_score = 0
+    show_key = apple_title_key(show_title)
+    for result in search_payload.get("results", []):
+        track_title = normalize_space(result.get("trackName", ""))
+        podcast_name = normalize_space(result.get("collectionName", ""))
+        episode_url = result.get("episodeUrl") or result.get("trackViewUrl") or ""
+        if not track_title or not episode_url.startswith("http"):
+            continue
+        show_score = apple_match_score(show_title, podcast_name)
+        if show_score < 2 and show_key not in apple_title_key(podcast_name):
+            continue
+        title_score = apple_match_score(episode_title, track_title)
+        total_score = title_score + show_score
+        if total_score > best_score:
+            best_score = total_score
+            best_url = episode_url
+    return best_url if best_score >= 6 else ""
+
+
 class SearchEngine:
     def __init__(self, rss_url: str = DEFAULT_RSS_URL) -> None:
         self.rss_url = rss_url
@@ -248,7 +286,6 @@ class SearchEngine:
         self.episodes: list[dict[str, Any]] = []
         self.chunks: list[dict[str, Any]] = []
         self.last_error: str | None = None
-        self.apple_episode_urls: dict[str, str] = {}
         self.refresh(force=False)
 
     def refresh(self, force: bool = False) -> None:
@@ -340,6 +377,8 @@ class SearchEngine:
         episodes = cache.get("episodes", [])
         if not episodes:
             return True
+        if not any(episode.get("episode_url") for episode in episodes):
+            return True
         for episode in episodes:
             required = ["episode_id", "title", "published", "chunks"]
             if any(not episode.get(key) for key in required):
@@ -372,8 +411,6 @@ class SearchEngine:
         channel = root.find("channel")
         if channel is None:
             return []
-        channel_title = normalize_space(channel.findtext("title", default=SHOW_TITLE)) or SHOW_TITLE
-        self.apple_episode_urls = self._load_apple_episode_urls(channel_title)
 
         ns = {
             "itunes": "http://www.itunes.com/dtds/podcast-1.0.dtd",
@@ -407,7 +444,7 @@ class SearchEngine:
                     "published_iso": published_iso,
                     "season": season,
                     "episode_number": episode_number,
-                    "episode_url": self._resolve_episode_url(title, link),
+                    "episode_url": self._resolve_episode_url(title, link, SHOW_TITLE),
                     "audio_url": audio_url,
                     "description": description,
                     "summary_text": normalize_space(" ".join(part for part in [subtitle, description, content_text] if part)),
@@ -417,73 +454,10 @@ class SearchEngine:
         episodes.sort(key=lambda episode: episode.get("published") or "", reverse=True)
         return episodes
 
-    def _load_apple_episode_urls(self, show_title: str) -> dict[str, str]:
-        search_params = urllib.parse.urlencode(
-            {
-                "term": show_title,
-                "media": "podcast",
-                "entity": "podcast",
-                "limit": 10,
-            }
-        )
-        search_url = f"https://itunes.apple.com/search?{search_params}"
-        try:
-            search_payload = fetch_json(search_url, timeout=20)
-        except Exception:
-            return {}
-
-        collection = None
-        show_key = apple_title_key(show_title)
-        for result in search_payload.get("results", []):
-            collection_name = normalize_space(result.get("collectionName", ""))
-            if apple_title_key(collection_name) == show_key:
-                collection = result
-                break
-        if collection is None and search_payload.get("results"):
-            collection = search_payload["results"][0]
-        if collection is None:
-            return {}
-
-        collection_id = collection.get("collectionId")
-        if not collection_id:
-            return {}
-
-        lookup_params = urllib.parse.urlencode(
-            {
-                "id": collection_id,
-                "entity": "podcastEpisode",
-                "limit": 200,
-            }
-        )
-        lookup_url = f"https://itunes.apple.com/lookup?{lookup_params}"
-        try:
-            lookup_payload = fetch_json(lookup_url, timeout=20)
-        except Exception:
-            return {}
-
-        episode_urls: dict[str, str] = {}
-        for result in lookup_payload.get("results", []):
-            wrapper_type = result.get("wrapperType", "")
-            kind = result.get("kind", "")
-            if wrapper_type != "podcastEpisode" and kind != "podcast-episode":
-                continue
-            episode_title = normalize_space(result.get("trackName", ""))
-            episode_url = result.get("episodeUrl") or result.get("trackViewUrl") or ""
-            if episode_title and episode_url.startswith("http"):
-                episode_urls.setdefault(episode_title, episode_url)
-        return episode_urls
-
-    def _resolve_episode_url(self, title: str, rss_link: str) -> str:
+    def _resolve_episode_url(self, title: str, rss_link: str, show_title: str) -> str:
         if rss_link.startswith("http"):
             return rss_link
-        best_url = ""
-        best_score = 0
-        for apple_title, apple_url in self.apple_episode_urls.items():
-            score = apple_match_score(title, apple_title)
-            if score > best_score:
-                best_score = score
-                best_url = apple_url
-        return best_url if best_score >= 4 else ""
+        return lookup_apple_episode_url(show_title, title)
 
     def _extract_transcript_from_item(self, item: ET.Element, ns: dict[str, str]) -> str:
         transcript_candidates: list[str] = []
