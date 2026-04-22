@@ -7,7 +7,6 @@ import re
 import tempfile
 import urllib.request
 import xml.etree.ElementTree as ET
-from collections import defaultdict
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from html import unescape
@@ -60,6 +59,11 @@ def normalize_space(value: str) -> str:
 
 def normalize_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+
+
+def slugify(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return slug or "episode"
 
 
 def tokenize(value: str) -> list[str]:
@@ -136,13 +140,6 @@ def strip_html(value: str) -> str:
     return normalize_space(unescape(parser.text()))
 
 
-def safe_int(value: str | None) -> int | None:
-    if value is None:
-        return None
-    match = re.search(r"\d+", str(value))
-    return int(match.group()) if match else None
-
-
 def parse_pub_date(value: str) -> tuple[str | None, str | None]:
     if not value:
         return None, None
@@ -205,6 +202,28 @@ def fetch_bytes(url: str, timeout: int = 30) -> bytes:
     request = urllib.request.Request(url, headers=DEFAULT_HEADERS)
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return response.read()
+
+
+def resolve_episode_url(channel_link: str, link: str, guid: str, title: str) -> str:
+    candidates = [normalize_space(link), normalize_space(guid)]
+    for candidate in candidates:
+        if candidate.startswith("http") and "/episodes/" in candidate:
+            return candidate
+    for candidate in candidates:
+        if candidate.startswith("http"):
+            return candidate
+
+    channel_link = normalize_space(channel_link)
+    if "buzzsprout.com" not in channel_link:
+        return ""
+
+    show_match = re.search(r"buzzsprout\.com/(\d+)", channel_link)
+    episode_match = re.search(r"(\d{6,})", guid)
+    if show_match and episode_match:
+        show_id = show_match.group(1)
+        episode_id = episode_match.group(1)
+        return f"https://hoosierhealthmatters.buzzsprout.com/{show_id}/episodes/{episode_id}-{slugify(title)}"
+    return ""
 
 
 class SearchEngine:
@@ -339,6 +358,7 @@ class SearchEngine:
         if channel is None:
             return []
 
+        channel_link = normalize_space(channel.findtext("link", default="https://hoosierhealthmatters.buzzsprout.com/2446815"))
         ns = {
             "itunes": "http://www.itunes.com/dtds/podcast-1.0.dtd",
             "content": "http://purl.org/rss/1.0/modules/content/",
@@ -363,6 +383,7 @@ class SearchEngine:
             enclosure = item.find("enclosure")
             audio_url = enclosure.attrib.get("url", "").strip() if enclosure is not None else ""
             episode_id = guid or f"{published}-{normalize_key(title)}"
+            episode_url = resolve_episode_url(channel_link, link, guid, title)
             episodes.append(
                 {
                     "episode_id": episode_id,
@@ -371,7 +392,7 @@ class SearchEngine:
                     "published_iso": published_iso,
                     "season": season,
                     "episode_number": episode_number,
-                    "episode_url": link if link.startswith("http") else "",
+                    "episode_url": episode_url,
                     "audio_url": audio_url,
                     "description": description,
                     "summary_text": normalize_space(" ".join(part for part in [subtitle, description, content_text] if part)),
@@ -597,14 +618,14 @@ class SearchEngine:
     ) -> str:
         if not episodes:
             return (
-                "I couldn’t find a supported answer in the indexed archive. Try a different guest name, topic, or season and episode reference."
+                "I couldn't find a supported answer in the indexed archive. Try a different guest name, topic, or season and episode reference."
             )
 
         if not self.client:
             return self._fallback_answer(query, intent, episodes, chunks)
         if intent["intent"] == "topic_search" and not chunks:
             return (
-                "I found possibly relevant episodes, but I don’t have enough retrieved excerpt text to answer that topic safely."
+                "I found possibly relevant episodes, but I don't have enough retrieved excerpt text to answer that topic safely."
             )
 
         context_lines = []
@@ -657,4 +678,4 @@ class SearchEngine:
         if chunks:
             summary = chunks[0]["chunk_text"]
             return f"{label} appears most relevant. Based on the retrieved excerpt: {summary}"
-        return f"{label} appears to be the closest archive match for “{query}.”"
+        return f"{label} appears to be the closest archive match for “{query}."
