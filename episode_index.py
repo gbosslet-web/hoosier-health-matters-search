@@ -47,7 +47,7 @@ class PlainTextHTMLParser(HTMLParser):
 
 
 def get_logo_path() -> Path:
-    return ASSETS_DIR / "logo.svg"
+    return ASSETS_DIR / "HHM logo.jpeg"
 
 
 def utc_now_iso() -> str:
