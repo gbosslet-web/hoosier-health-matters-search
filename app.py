@@ -1,17 +1,13 @@
+from pathlib import Path
+
 import streamlit as st
 
-from episode_index import (
-    DEFAULT_RSS_URL,
-    OPENAI_CONFIGURED,
-    SearchEngine,
-    format_episode_label,
-    get_logo_path,
-)
+from episode_index import OPENAI_CONFIGURED, SearchEngine, format_episode_label, get_logo_path
 
 
 st.set_page_config(
     page_title="Hoosier Health Matters Episode Search",
-    page_icon=str(get_logo_path()),
+    page_icon="🎙️",
     layout="centered",
 )
 
@@ -67,12 +63,6 @@ def render_styles() -> None:
         .hero-shell {
             text-align: center;
             margin-bottom: 1.4rem;
-        }
-
-        .hero-logo {
-            display: flex;
-            justify-content: center;
-            margin-bottom: 1rem;
         }
 
         .hero-title {
@@ -169,6 +159,18 @@ def get_engine() -> SearchEngine:
     return SearchEngine()
 
 
+def render_logo() -> None:
+    logo_path = get_logo_path()
+    try:
+        image_bytes = Path(logo_path).read_bytes()
+        st.image(image_bytes, width=108)
+    except Exception:
+        st.markdown(
+            '<div style="font-size:3rem; line-height:1; margin-bottom:0.35rem;">🎙️</div>',
+            unsafe_allow_html=True,
+        )
+
+
 def render_episode_list(episodes: list[dict]) -> None:
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown('<div class="section-title">Matched episode(s)</div>', unsafe_allow_html=True)
@@ -249,7 +251,7 @@ def main() -> None:
     render_sidebar(engine)
 
     st.markdown('<div class="hero-shell">', unsafe_allow_html=True)
-    st.image(str(get_logo_path()), width=108)
+    render_logo()
     st.markdown(
         '<div class="hero-title">Hoosier Health Matters Episode Search</div>',
         unsafe_allow_html=True,
@@ -262,7 +264,7 @@ def main() -> None:
 
     query = st.text_input(
         "Search the archive",
-        placeholder="Ask about a guest, a topic, or a season and episode number…",
+        placeholder="Ask about a guest, a topic, or a season and episode number...",
         label_visibility="collapsed",
     )
     st.markdown(
