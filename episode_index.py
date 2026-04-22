@@ -24,7 +24,7 @@ DATA_DIR = BASE_DIR / "data"
 CACHE_PATH = DATA_DIR / "archive_index.json"
 ASSETS_DIR = BASE_DIR / "assets"
 DEFAULT_RSS_URL = os.getenv("HHM_RSS_URL", "https://feeds.buzzsprout.com/2446815.rss")
-CACHE_VERSION = 4
+CACHE_VERSION = 5
 EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 ANSWER_MODEL = os.getenv("OPENAI_RESPONSE_MODEL", "gpt-4.1-mini")
 TRANSCRIPTION_MODEL = os.getenv("OPENAI_TRANSCRIPTION_MODEL", "gpt-4o-mini-transcribe")
@@ -33,6 +33,10 @@ DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 }
 SHOW_TITLE = "Hoosier Health Matters"
+BUZZSPROUT_EPISODES_URL = os.getenv(
+    "HHM_BUZZSPROUT_EPISODES_URL",
+    "https://hoosierhealthmatters.buzzsprout.com/2446815/episodes",
+)
 APPLE_SHOW_URL = os.getenv(
     "HHM_APPLE_SHOW_URL",
     "https://podcasts.apple.com/us/podcast/hoosier-health-matters/id1793605849",
@@ -64,6 +68,36 @@ class AppleEpisodeLinkParser(HTMLParser):
             return
         href = dict(attrs).get("href") or ""
         if "/podcast/" in href and "?i=" in href:
+            self._active_href = href
+            self._active_parts = []
+
+    def handle_data(self, data: str) -> None:
+        if self._active_href and data.strip():
+            self._active_parts.append(data.strip())
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag != "a" or not self._active_href:
+            return
+        text = normalize_space(" ".join(self._active_parts))
+        if text:
+            self.links.append((self._active_href, text))
+        self._active_href = None
+        self._active_parts = []
+
+
+class EpisodeLinkParser(HTMLParser):
+    def __init__(self, href_predicate) -> None:
+        super().__init__()
+        self.href_predicate = href_predicate
+        self.links: list[tuple[str, str]] = []
+        self._active_href: str | None = None
+        self._active_parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag != "a":
+            return
+        href = dict(attrs).get("href") or ""
+        if self.href_predicate(href):
             self._active_href = href
             self._active_parts = []
 
@@ -323,10 +357,37 @@ def fetch_apple_show_page_links() -> list[tuple[str, str]]:
     return parser.links
 
 
+@lru_cache(maxsize=1)
+def fetch_buzzsprout_episode_links() -> list[tuple[str, str]]:
+    try:
+        html = fetch_bytes(BUZZSPROUT_EPISODES_URL, timeout=20).decode("utf-8", errors="ignore")
+    except Exception:
+        return []
+
+    parser = EpisodeLinkParser(lambda href: "/episodes/" in href)
+    parser.feed(html)
+    links: list[tuple[str, str]] = []
+    for href, text in parser.links:
+        absolute = urllib.parse.urljoin(BUZZSPROUT_EPISODES_URL, href)
+        links.append((absolute, text))
+    return links
+
+
 def lookup_apple_show_page_episode_url(episode_title: str) -> str:
     best_url = ""
     best_score = 0
     for url, link_text in fetch_apple_show_page_links():
+        score = apple_match_score(episode_title, link_text)
+        if score > best_score:
+            best_score = score
+            best_url = url
+    return best_url if best_score >= 6 else ""
+
+
+def lookup_buzzsprout_episode_url(episode_title: str) -> str:
+    best_url = ""
+    best_score = 0
+    for url, link_text in fetch_buzzsprout_episode_links():
         score = apple_match_score(episode_title, link_text)
         if score > best_score:
             best_score = score
@@ -513,6 +574,9 @@ class SearchEngine:
     def _resolve_episode_url(self, title: str, rss_link: str, show_title: str) -> str:
         if rss_link.startswith("http"):
             return rss_link
+        buzzsprout_url = lookup_buzzsprout_episode_url(title)
+        if buzzsprout_url:
+            return buzzsprout_url
         apple_url = lookup_apple_episode_url(show_title, title)
         if apple_url:
             return apple_url
