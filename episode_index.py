@@ -196,10 +196,11 @@ def extract_person_name(query: str) -> str | None:
     for pattern in patterns:
         match = re.search(pattern, query, re.IGNORECASE)
         if match:
-            candidate = normalize_space(match.group(1).strip(" ?!.,"))
+            candidate = normalize_space(match.group(1).strip(" ?!.,")) 
             if len(candidate.split()) >= 2:
                 return candidate
 
+    # Fallback for capitalized names in otherwise free-form queries.
     title_case_names = re.findall(r"\b[A-Z][a-zA-Z'.-]+(?:\s+[A-Z][a-zA-Z'.-]+)+\b", query)
     if title_case_names:
         return normalize_space(title_case_names[0])
@@ -402,13 +403,50 @@ def clean_display_excerpt(text: str, max_chars: int = 200) -> str:
     if not cleaned:
         return ""
     cleaned = re.sub(r"\((?:here|see|link|newsletter)[^)]+\)", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"^(?:here we discuss|gabe and tracey discuss|discussion of)\s+", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(
+        r"^(?:here we discuss|gabe and tracey discuss|discussion of|long discussion of)\s+",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
     cleaned = re.sub(r"^in this episode[^.]*\.\s*", "", cleaned, flags=re.IGNORECASE)
     cleaned = normalize_space(cleaned).strip(" -.,;:")
     if len(cleaned) <= max_chars:
         return cleaned
     truncated = cleaned[: max_chars - 1].rsplit(" ", 1)[0].strip()
     return f"{truncated}..."
+
+
+def format_card_excerpt(raw_excerpt: str, query: str, intent: dict[str, Any], max_chars: int = 140) -> str:
+    cleaned = clean_display_excerpt(raw_excerpt, max_chars=max_chars + 40)
+    if not cleaned:
+        return ""
+
+    person_name = intent.get("person_name")
+    if intent.get("intent") == "guest_lookup" and person_name:
+        return f"Features guest {person_name}."
+
+    trimmed = cleaned
+    for separator in [". ", "; ", ": ", ", who ", ", which ", ", and "]:
+        position = trimmed.find(separator)
+        if position > 40:
+            trimmed = trimmed[:position].strip(" -.,;:")
+            break
+
+    if len(trimmed) > max_chars:
+        trimmed = trimmed[: max_chars - 1].rsplit(" ", 1)[0].strip(" -.,;:")
+
+    if not trimmed:
+        return ""
+
+    lowered = trimmed.lower()
+    if not lowered.startswith(("discusses ", "features ", "covers ", "interviews ", "explains ")):
+        if lowered.startswith(("the ", "a ", "an ")):
+            trimmed = f"Discusses {trimmed[0].lower()}{trimmed[1:]}"
+        else:
+            trimmed = f"Discusses {trimmed}"
+
+    return trimmed.rstrip(".") + "."
 
 
 def make_query_focused_excerpt(text: str, query: str, max_chars: int = 240) -> str:
@@ -663,7 +701,10 @@ class SearchEngine:
         matched_episodes = self._retrieve_episodes(normalized_query, intent, query_embedding)
         top_episodes = matched_episodes[:4]
         supporting_chunks = self._retrieve_chunks(normalized_query, top_episodes, query_embedding)
-        top_episodes = self._attach_episode_support(top_episodes, supporting_chunks, normalized_query)
+        top_episodes = self._attach_episode_support(top_episodes, supporting_chunks, normalized_query, intent)
+        excerpt_backed_episodes = [episode for episode in top_episodes if episode.get("discussion_excerpt")]
+        if excerpt_backed_episodes:
+            top_episodes = excerpt_backed_episodes[:4]
         answer = self._answer_query(normalized_query, intent, top_episodes, supporting_chunks)
         support_note = None
         if not self.client:
@@ -681,6 +722,7 @@ class SearchEngine:
         episodes: list[dict[str, Any]],
         chunks: list[dict[str, Any]],
         query: str,
+        intent: dict[str, Any],
     ) -> list[dict[str, Any]]:
         best_chunk_by_episode: dict[str, dict[str, Any]] = {}
         for chunk in chunks:
@@ -698,7 +740,12 @@ class SearchEngine:
                 if episode_copy.get("transcript_source") in {"rss", "missing"}:
                     source_text = episode_copy.get("summary_text") or source_text
                 support = select_support_snippet(source_text, query)
-                episode_copy["discussion_excerpt"] = support.get("excerpt")
+                if support.get("excerpt"):
+                    episode_copy["discussion_excerpt"] = format_card_excerpt(
+                        support["excerpt"],
+                        query,
+                        intent,
+                    )
                 if support.get("timestamp"):
                     episode_copy["discussion_timestamp"] = support["timestamp"]
                     episode_copy["discussion_timestamp_approx"] = False
@@ -958,7 +1005,7 @@ class SearchEngine:
             return exact_matches
 
         query_terms = intent.get("keywords") or expand_keywords(query)
-        person_name = intent.get("person_name") or ""
+        person_name = normalize_key(intent.get("person_name") or "")
         scored: list[dict[str, Any]] = []
         for episode in self.episodes:
             summary_blob = normalize_key(
@@ -971,21 +1018,24 @@ class SearchEngine:
             score = 0.0
             reasons: list[str] = []
 
-            if person_name and guest_name_match_score(person_name, raw_summary) >= 1.7:
-                score += 5.0
-                reasons.append("Guest name found in episode archive")
-                person_pattern = re.escape(intent.get("person_name", ""))
-                interview_pattern = rf"(interview|guest|discussion|featured|featuring).{{0,120}}{person_pattern}|{person_pattern}.{{0,120}}(interview|guest|discussion|featured|featuring)"
-                fuzzy_interview = guest_name_match_score(person_name, raw_summary) >= 1.7 and any(
-                    term in raw_summary.lower() for term in ["interview", "guest", "featured", "featuring"]
-                )
-                if re.search(interview_pattern, raw_summary, re.IGNORECASE) or fuzzy_interview:
+            if intent["intent"] == "guest_lookup" and person_name:
+                if guest_name_match_score(person_name, raw_summary) >= 1.7:
                     score += 5.0
-                    reasons = ["Direct guest interview match"]
-                if guest_name_match_score(person_name, episode.get("title", "")) >= 1.0:
-                    score += 2.5
-            elif intent["intent"] == "guest_lookup" and person_name:
-                score += guest_name_match_score(person_name, raw_summary) * 0.8
+                    reasons.append("Guest name found in episode archive")
+                    person_pattern = re.escape(intent.get("person_name", ""))
+                    interview_pattern = rf"(interview|guest|discussion|featured|featuring).{{0,120}}{person_pattern}|{person_pattern}.{{0,120}}(interview|guest|discussion|featured|featuring)"
+                    fuzzy_interview = guest_name_match_score(person_name, raw_summary) >= 1.7 and any(
+                        term in raw_summary.lower() for term in ["interview", "guest", "featured", "featuring"]
+                    )
+                    if re.search(interview_pattern, raw_summary, re.IGNORECASE) or fuzzy_interview:
+                        score += 5.0
+                        reasons = ["Direct guest interview match"]
+                    if guest_name_match_score(person_name, episode.get("title", "")) >= 1.0:
+                        score += 2.5
+                else:
+                    score += guest_name_match_score(person_name, raw_summary) * 0.8
+            elif person_name:
+                score += guest_name_match_score(person_name, raw_summary) * 0.9
 
             keyword_hits = sum(term in summary_blob for term in query_terms)
             title_hits = sum(term in title_blob for term in query_terms)
@@ -1026,4 +1076,82 @@ class SearchEngine:
                 continue
             chunk_blob = normalize_key(chunk["chunk_text"])
             keyword_score = sum(term in chunk_blob for term in query_terms) * 0.35
-            semantic_score = cosine_similarity(query_embedding, chunk[
+            semantic_score = cosine_similarity(query_embedding, chunk["embedding"]) * 2.2 if query_embedding else 0.0
+            total_score = keyword_score + semantic_score
+            if total_score > 0:
+                chunk_copy = dict(chunk)
+                chunk_copy["score"] = total_score
+                candidates.append(chunk_copy)
+        candidates.sort(key=lambda chunk: chunk["score"], reverse=True)
+        return candidates[:6]
+
+    def _answer_query(
+        self,
+        query: str,
+        intent: dict[str, Any],
+        episodes: list[dict[str, Any]],
+        chunks: list[dict[str, Any]],
+    ) -> str:
+        if not episodes:
+            return (
+                "I couldn’t find a supported answer in the indexed archive. Try a different guest name, topic, or season and episode reference."
+            )
+
+        if not self.client:
+            return self._fallback_answer(query, intent, episodes, chunks)
+        if intent["intent"] == "topic_search" and not chunks:
+            return (
+                "I found possibly relevant episodes, but I don’t have enough retrieved excerpt text to answer that topic safely."
+            )
+
+        context_lines = []
+        for episode in episodes:
+            context_lines.append(
+                f"EPISODE: {format_episode_label(episode)} | Published: {episode.get('published') or 'Unknown'}"
+            )
+        for index, chunk in enumerate(chunks, start=1):
+            context_lines.append(f"EXCERPT {index}: {chunk['chunk_text']}")
+
+        prompt = (
+            "Answer the user using only the supplied episode metadata and excerpts. "
+            "Be concise, trustworthy, and explicit when the archive does not fully support an answer. "
+            "Mention episode title, season, episode number, and published date when relevant. "
+            "Do not fabricate episode details or guest appearances."
+        )
+        try:
+            response = self.client.responses.create(
+                model=ANSWER_MODEL,
+                input=[
+                    {"role": "system", "content": prompt},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": f"Query: {query}"},
+                            {"type": "input_text", "text": "\n".join(context_lines)},
+                        ],
+                    },
+                ],
+            )
+            return normalize_space(response.output_text)
+        except Exception:
+            return self._fallback_answer(query, intent, episodes, chunks)
+
+    def _fallback_answer(
+        self,
+        query: str,
+        intent: dict[str, Any],
+        episodes: list[dict[str, Any]],
+        chunks: list[dict[str, Any]],
+    ) -> str:
+        lead = episodes[0]
+        label = format_episode_label(lead)
+        if intent["intent"] == "episode_lookup":
+            published = lead.get("published") or "an unknown date"
+            return f"The best exact match is {label}, published on {published}."
+        if intent["intent"] == "guest_lookup":
+            published = lead.get("published") or "an unknown date"
+            return f"The archive most strongly points to {label}, published on {published}."
+        if chunks:
+            summary = chunks[0]["chunk_text"]
+            return f"{label} appears most relevant. Based on the retrieved excerpt: {summary}"
+        return f"{label} appears to be the closest archive match for “{query}."
