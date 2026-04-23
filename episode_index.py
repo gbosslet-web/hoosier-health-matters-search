@@ -282,6 +282,36 @@ def format_timestamp(seconds: int | None) -> str | None:
     return f"{minutes}:{secs:02d}"
 
 
+def split_excerpt_units(text: str) -> list[str]:
+    normalized = normalize_space(text)
+    if not normalized:
+        return []
+    units = re.split(r"(?:(?<=[.!?])\s+|\s+\d{1,2}:\d{2}\s*[-–]\s*)", normalized)
+    return [unit.strip(" -") for unit in units if unit.strip(" -")]
+
+
+def make_query_focused_excerpt(text: str, query: str, max_chars: int = 240) -> str:
+    units = split_excerpt_units(text)
+    if not units:
+        return ""
+    keywords = expand_keywords(query)
+    best_unit = units[0]
+    best_score = -1.0
+    for unit in units:
+        unit_key = normalize_key(unit)
+        keyword_hits = sum(term in unit_key for term in keywords)
+        score = keyword_hits
+        if len(unit) <= max_chars:
+            score += 0.2
+        if score > best_score:
+            best_score = score
+            best_unit = unit
+    if len(best_unit) <= max_chars:
+        return best_unit
+    truncated = best_unit[: max_chars - 1].rsplit(" ", 1)[0].strip()
+    return f"{truncated}..."
+
+
 def chunk_transcript(text: str, target_words: int = 180, overlap_words: int = 45) -> list[dict[str, Any]]:
     words = text.split()
     if len(words) <= target_words:
@@ -498,7 +528,7 @@ class SearchEngine:
         matched_episodes = self._retrieve_episodes(normalized_query, intent, query_embedding)
         top_episodes = matched_episodes[:4]
         supporting_chunks = self._retrieve_chunks(normalized_query, top_episodes, query_embedding)
-        top_episodes = self._attach_episode_support(top_episodes, supporting_chunks)
+        top_episodes = self._attach_episode_support(top_episodes, supporting_chunks, normalized_query)
         answer = self._answer_query(normalized_query, intent, top_episodes, supporting_chunks)
         support_note = None
         if not self.client:
@@ -515,6 +545,7 @@ class SearchEngine:
         self,
         episodes: list[dict[str, Any]],
         chunks: list[dict[str, Any]],
+        query: str,
     ) -> list[dict[str, Any]]:
         best_chunk_by_episode: dict[str, dict[str, Any]] = {}
         for chunk in chunks:
@@ -528,9 +559,13 @@ class SearchEngine:
             episode_copy = dict(episode)
             best_chunk = best_chunk_by_episode.get(episode["episode_id"])
             if best_chunk:
-                episode_copy["discussion_excerpt"] = best_chunk["chunk_text"]
-                episode_copy["discussion_timestamp"] = best_chunk.get("timestamp_label")
-                episode_copy["discussion_timestamp_approx"] = best_chunk.get("timestamp_seconds") is not None
+                source_text = best_chunk["chunk_text"]
+                if episode_copy.get("transcript_source") == "missing":
+                    source_text = episode_copy.get("summary_text") or source_text
+                episode_copy["discussion_excerpt"] = make_query_focused_excerpt(source_text, query)
+                if episode_copy.get("transcript_source") in {"rss", "transcribed"}:
+                    episode_copy["discussion_timestamp"] = best_chunk.get("timestamp_label")
+                    episode_copy["discussion_timestamp_approx"] = best_chunk.get("timestamp_seconds") is not None
             enriched.append(episode_copy)
         return enriched
 
