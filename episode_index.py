@@ -282,25 +282,84 @@ def format_timestamp(seconds: int | None) -> str | None:
     return f"{minutes}:{secs:02d}"
 
 
-def split_excerpt_units(text: str) -> list[str]:
+TIMELINE_MARKER_RE = re.compile(r"(?P<ts>\b\d{1,2}:\d{2}(?::\d{2})?)\s*[-–]\s*")
+LOW_SIGNAL_MARKERS = [
+    "intro",
+    "wrap up",
+    "thanks for listening",
+    "join the good trouble",
+    "board member",
+    "board members",
+    "become a member",
+    "donate to support",
+    "follow us on bluesky",
+    "follow us on instagram",
+]
+
+
+def strip_episode_boilerplate(text: str) -> str:
     normalized = normalize_space(text)
+    if not normalized:
+        return ""
+    normalized = re.sub(
+        r"Hoosier Health Matters\s+Season\s+\d+,\s*Episode\s+\d+\s+Date:\s*[^T]+Title:\s*",
+        "",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    normalized = re.sub(r"\bTitle:\s*", "", normalized, flags=re.IGNORECASE)
+    return normalized.strip(" -")
+
+
+def split_excerpt_units(text: str) -> list[str]:
+    normalized = strip_episode_boilerplate(text)
     if not normalized:
         return []
     units = re.split(r"(?:(?<=[.!?])\s+|\s+\d{1,2}:\d{2}\s*[-–]\s*)", normalized)
     return [unit.strip(" -") for unit in units if unit.strip(" -")]
 
 
+def extract_timeline_segments(text: str) -> list[dict[str, str]]:
+    normalized = strip_episode_boilerplate(text)
+    if not normalized:
+        return []
+    matches = list(TIMELINE_MARKER_RE.finditer(normalized))
+    if not matches:
+        return []
+
+    segments: list[dict[str, str]] = []
+    for index, match in enumerate(matches):
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(normalized)
+        segment_text = normalize_space(normalized[start:end].strip(" -"))
+        if segment_text:
+            segment_key = normalize_key(segment_text)
+            if any(marker in segment_key for marker in LOW_SIGNAL_MARKERS if marker != "intro"):
+                continue
+            segments.append({"timestamp": match.group("ts"), "text": segment_text})
+    return segments
+
+
+def score_excerpt_candidate(text: str, query: str) -> float:
+    text_key = normalize_key(text)
+    keywords = expand_keywords(query)
+    score = float(sum(term in text_key for term in keywords))
+    query_key = normalize_key(query)
+    if query_key and query_key in text_key:
+        score += 2.5
+    if any(marker in text_key for marker in LOW_SIGNAL_MARKERS):
+        score -= 2.0
+    return score
+
+
 def make_query_focused_excerpt(text: str, query: str, max_chars: int = 240) -> str:
     units = split_excerpt_units(text)
     if not units:
         return ""
-    keywords = expand_keywords(query)
     best_unit = units[0]
     best_score = -1.0
     for unit in units:
-        unit_key = normalize_key(unit)
-        keyword_hits = sum(term in unit_key for term in keywords)
-        score = keyword_hits
+        score = score_excerpt_candidate(unit, query)
         if len(unit) <= max_chars:
             score += 0.2
         if score > best_score:
@@ -310,6 +369,24 @@ def make_query_focused_excerpt(text: str, query: str, max_chars: int = 240) -> s
         return best_unit
     truncated = best_unit[: max_chars - 1].rsplit(" ", 1)[0].strip()
     return f"{truncated}..."
+
+
+def select_support_snippet(text: str, query: str, max_chars: int = 240) -> dict[str, str | None]:
+    segments = extract_timeline_segments(text)
+    if segments:
+        best_segment = max(segments, key=lambda segment: score_excerpt_candidate(segment["text"], query))
+        best_score = score_excerpt_candidate(best_segment["text"], query)
+        if best_score <= 0:
+            return {"excerpt": None, "timestamp": None}
+        excerpt = best_segment["text"]
+        if len(excerpt) > max_chars:
+            excerpt = excerpt[: max_chars - 1].rsplit(" ", 1)[0].strip() + "..."
+        return {"excerpt": excerpt, "timestamp": best_segment["timestamp"]}
+
+    excerpt = make_query_focused_excerpt(text, query, max_chars=max_chars)
+    if excerpt and score_excerpt_candidate(excerpt, query) <= 0:
+        return {"excerpt": None, "timestamp": None}
+    return {"excerpt": excerpt, "timestamp": None}
 
 
 def chunk_transcript(text: str, target_words: int = 180, overlap_words: int = 45) -> list[dict[str, Any]]:
@@ -560,12 +637,13 @@ class SearchEngine:
             best_chunk = best_chunk_by_episode.get(episode["episode_id"])
             if best_chunk:
                 source_text = best_chunk["chunk_text"]
-                if episode_copy.get("transcript_source") == "missing":
+                if episode_copy.get("transcript_source") in {"rss", "missing"}:
                     source_text = episode_copy.get("summary_text") or source_text
-                episode_copy["discussion_excerpt"] = make_query_focused_excerpt(source_text, query)
-                if episode_copy.get("transcript_source") in {"rss", "transcribed"}:
-                    episode_copy["discussion_timestamp"] = best_chunk.get("timestamp_label")
-                    episode_copy["discussion_timestamp_approx"] = best_chunk.get("timestamp_seconds") is not None
+                support = select_support_snippet(source_text, query)
+                episode_copy["discussion_excerpt"] = support.get("excerpt")
+                if support.get("timestamp"):
+                    episode_copy["discussion_timestamp"] = support["timestamp"]
+                    episode_copy["discussion_timestamp_approx"] = False
             enriched.append(episode_copy)
         return enriched
 
