@@ -231,7 +231,9 @@ def render_episode_list(episodes: list[dict]) -> None:
             if episode.get("discussion_timestamp"):
                 stamp_label = escape(episode["discussion_timestamp"])
                 if episode.get("discussion_timestamp_approx"):
-                    stamp_label = f"Around {stamp_label}"
+                    stamp_label = f"Around {stamp_label} in the episode"
+                else:
+                    stamp_label = f"At {stamp_label} in the episode"
                 st.markdown(
                     f'<div class="episode-stamp">{stamp_label}</div>',
                     unsafe_allow_html=True,
