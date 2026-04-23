@@ -201,7 +201,6 @@ def extract_person_name(query: str) -> str | None:
             if len(candidate.split()) >= 2:
                 return candidate
 
-    # Fallback for capitalized names in otherwise free-form queries.
     title_case_names = re.findall(r"\b[A-Z][a-zA-Z'.-]+(?:\s+[A-Z][a-zA-Z'.-]+)+\b", query)
     if title_case_names:
         return normalize_space(title_case_names[0])
@@ -231,6 +230,12 @@ def guest_name_match_score(person_name: str, text: str) -> float:
         elif best >= 0.7:
             score += 0.4
     return score
+
+
+def excerpt_mentions_person(person_name: str | None, text: str) -> bool:
+    if not person_name or not text:
+        return False
+    return guest_name_match_score(person_name, text) >= 1.7
 
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -415,6 +420,7 @@ def clean_display_excerpt(text: str, max_chars: int = 200) -> str:
         flags=re.IGNORECASE,
     )
     cleaned = re.sub(r"^in this episode[^.]*\.\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^(?:and|but|so)\s+", "", cleaned, flags=re.IGNORECASE)
     cleaned = normalize_space(cleaned).strip(" -.,;:")
     if len(cleaned) <= max_chars:
         return cleaned
@@ -778,12 +784,17 @@ class SearchEngine:
                     person_name=intent.get("person_name"),
                 )
                 if support.get("excerpt"):
-                    episode_copy["discussion_excerpt"] = format_card_excerpt(
+                    formatted_excerpt = format_card_excerpt(
                         support["excerpt"],
                         query,
                         intent,
                     )
-                if support.get("timestamp"):
+                    if not intent.get("person_name") or excerpt_mentions_person(
+                        intent.get("person_name"),
+                        formatted_excerpt,
+                    ):
+                        episode_copy["discussion_excerpt"] = formatted_excerpt
+                if support.get("timestamp") and episode_copy.get("discussion_excerpt"):
                     episode_copy["discussion_timestamp"] = support["timestamp"]
                     episode_copy["discussion_timestamp_approx"] = False
             enriched.append(episode_copy)
