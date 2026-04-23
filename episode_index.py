@@ -8,6 +8,7 @@ import tempfile
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from difflib import SequenceMatcher
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from html import unescape
@@ -184,6 +185,50 @@ def expand_keywords(query: str) -> list[str]:
         if phrase in lowered:
             expansions.extend(related_terms)
     return list(dict.fromkeys(keywords + expansions))
+
+
+def extract_person_name(query: str) -> str | None:
+    patterns = [
+        r"(?:interview|interviewed|feature|featured|featuring)\s+([A-Za-z][A-Za-z'.-]+(?:\s+[A-Za-z][A-Za-z'.-]+)+)",
+        r"(?:with)\s+([A-Za-z][A-Za-z'.-]+(?:\s+[A-Za-z][A-Za-z'.-]+)+)",
+        r"was\s+([A-Za-z][A-Za-z'.-]+(?:\s+[A-Za-z][A-Za-z'.-]+)+)\s+interviewed",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, query, re.IGNORECASE)
+        if match:
+            candidate = normalize_space(match.group(1).strip(" ?!.,"))
+            if len(candidate.split()) >= 2:
+                return candidate
+
+    title_case_names = re.findall(r"\b[A-Z][a-zA-Z'.-]+(?:\s+[A-Z][a-zA-Z'.-]+)+\b", query)
+    if title_case_names:
+        return normalize_space(title_case_names[0])
+    return None
+
+
+def guest_name_match_score(person_name: str, text: str) -> float:
+    if not person_name or not text:
+        return 0.0
+    person_parts = [part for part in normalize_key(person_name).split() if part]
+    text_tokens = [token for token in normalize_key(text).split() if token]
+    if not person_parts or not text_tokens:
+        return 0.0
+
+    score = 0.0
+    for part in person_parts:
+        best = 0.0
+        for token in text_tokens:
+            if part == token:
+                best = max(best, 1.0)
+            else:
+                best = max(best, SequenceMatcher(None, part, token).ratio())
+        if best >= 0.9:
+            score += 1.0
+        elif best >= 0.8:
+            score += 0.7
+        elif best >= 0.7:
+            score += 0.4
+    return score
 
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -863,26 +908,12 @@ class SearchEngine:
         lowered = query.lower()
         season_match = re.search(r"season\s+(\d+)", lowered)
         episode_match = re.search(r"(episode|ep)\s+(\d+)", lowered)
-        person_name = None
-        patterns = [
-            r"(?:interview|interviewed)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)",
-            r"(?:with|featuring)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)",
-            r"was\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\s+interviewed",
-        ]
-        for pattern in patterns:
-            match = re.search(pattern, query)
-            if match:
-                person_name = match.group(1)
-                break
-        if person_name is None:
-            title_case_names = re.findall(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+\b", query)
-            if title_case_names:
-                person_name = title_case_names[0]
+        person_name = extract_person_name(query)
 
         intent = "topic_search"
         if season_match or episode_match:
             intent = "episode_lookup"
-        elif any(term in lowered for term in ["interview", "interviewed", "guest", "who was", "appeared"]):
+        elif any(term in lowered for term in ["interview", "interviewed", "guest", "who was", "appeared", "feature", "featured", "featuring"]):
             intent = "guest_lookup"
 
         return {
@@ -914,7 +945,7 @@ class SearchEngine:
             return exact_matches
 
         query_terms = intent.get("keywords") or expand_keywords(query)
-        person_name = normalize_key(intent.get("person_name") or "")
+        person_name = intent.get("person_name") or ""
         scored: list[dict[str, Any]] = []
         for episode in self.episodes:
             summary_blob = normalize_key(
@@ -927,18 +958,21 @@ class SearchEngine:
             score = 0.0
             reasons: list[str] = []
 
-            if person_name and person_name in summary_blob:
+            if person_name and guest_name_match_score(person_name, raw_summary) >= 1.7:
                 score += 5.0
                 reasons.append("Guest name found in episode archive")
-                interview_pattern = rf"(interview|guest|discussion).{{0,120}}{re.escape(intent.get('person_name', ''))}|{re.escape(intent.get('person_name', ''))}.{{0,120}}(interview|guest|discussion)"
-                if re.search(interview_pattern, raw_summary, re.IGNORECASE):
+                person_pattern = re.escape(intent.get("person_name", ""))
+                interview_pattern = rf"(interview|guest|discussion|featured|featuring).{{0,120}}{person_pattern}|{person_pattern}.{{0,120}}(interview|guest|discussion|featured|featuring)"
+                fuzzy_interview = guest_name_match_score(person_name, raw_summary) >= 1.7 and any(
+                    term in raw_summary.lower() for term in ["interview", "guest", "featured", "featuring"]
+                )
+                if re.search(interview_pattern, raw_summary, re.IGNORECASE) or fuzzy_interview:
                     score += 5.0
                     reasons = ["Direct guest interview match"]
-                if person_name in title_blob:
+                if guest_name_match_score(person_name, episode.get("title", "")) >= 1.0:
                     score += 2.5
             elif intent["intent"] == "guest_lookup" and person_name:
-                overlap = sum(part in summary_blob for part in person_name.split())
-                score += overlap * 0.8
+                score += guest_name_match_score(person_name, raw_summary) * 0.8
 
             keyword_hits = sum(term in summary_blob for term in query_terms)
             title_hits = sum(term in title_blob for term in query_terms)
@@ -954,6 +988,13 @@ class SearchEngine:
                 scored.append(episode_copy)
 
         scored.sort(key=lambda episode: (episode["score"], episode.get("published") or ""), reverse=True)
+        if intent["intent"] == "guest_lookup":
+            direct_matches = [episode for episode in scored if episode.get("match_reason") == "Direct guest interview match"]
+            if direct_matches:
+                return direct_matches
+            named_matches = [episode for episode in scored if episode.get("match_reason") == "Guest name found in episode archive"]
+            if named_matches:
+                return named_matches
         return scored
 
     def _retrieve_chunks(
