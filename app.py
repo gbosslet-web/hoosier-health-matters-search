@@ -254,6 +254,15 @@ def render_answer(answer: str) -> None:
     st.markdown("</div>", unsafe_allow_html=True)
 
 
+def is_transcript_safety_fallback(answer: str) -> bool:
+    normalized = " ".join((answer or "").split()).lower()
+    return normalized.startswith(
+        "i found relevant episodes, but i don't have transcript-backed excerpts to answer that question safely yet"
+    ) or normalized.startswith(
+        "i found relevant episodes, but i don’t have transcript-backed excerpts to answer that question safely yet"
+    )
+
+
 def render_sidebar(engine: SearchEngine) -> None:
     with st.sidebar:
         st.markdown("### Archive status")
@@ -322,7 +331,8 @@ def main() -> None:
         with st.spinner("Searching the archive..."):
             result = engine.search(query)
         render_episode_list(result["matched_episodes"])
-        render_answer(result["answer"])
+        if not is_transcript_safety_fallback(result["answer"]):
+            render_answer(result["answer"])
         if result.get("support_note"):
             st.caption(result["support_note"])
     else:
