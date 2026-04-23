@@ -24,7 +24,7 @@ DATA_DIR = BASE_DIR / "data"
 CACHE_PATH = DATA_DIR / "archive_index.json"
 ASSETS_DIR = BASE_DIR / "assets"
 DEFAULT_RSS_URL = os.getenv("HHM_RSS_URL", "https://feeds.buzzsprout.com/2446815.rss")
-CACHE_VERSION = 6
+CACHE_VERSION = 7
 EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 ANSWER_MODEL = os.getenv("OPENAI_RESPONSE_MODEL", "gpt-4.1-mini")
 TRANSCRIPTION_MODEL = os.getenv("OPENAI_TRANSCRIPTION_MODEL", "gpt-4o-mini-transcribe")
@@ -251,17 +251,48 @@ def looks_like_transcript(text: str) -> bool:
     return sum(marker in lower for marker in transcript_markers) >= 2
 
 
-def chunk_transcript(text: str, target_words: int = 180, overlap_words: int = 45) -> list[str]:
+def parse_duration_seconds(value: str | None) -> int | None:
+    if not value:
+        return None
+    raw = normalize_space(str(value))
+    if not raw:
+        return None
+    if raw.isdigit():
+        return int(raw)
+    parts = raw.split(":")
+    try:
+        if len(parts) == 2:
+            minutes, seconds = [int(part) for part in parts]
+            return minutes * 60 + seconds
+        if len(parts) == 3:
+            hours, minutes, seconds = [int(part) for part in parts]
+            return hours * 3600 + minutes * 60 + seconds
+    except ValueError:
+        return None
+    return None
+
+
+def format_timestamp(seconds: int | None) -> str | None:
+    if seconds is None or seconds < 0:
+        return None
+    hours, remainder = divmod(int(seconds), 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
+def chunk_transcript(text: str, target_words: int = 180, overlap_words: int = 45) -> list[dict[str, Any]]:
     words = text.split()
     if len(words) <= target_words:
-        return [normalize_space(text)]
-    chunks: list[str] = []
+        return [{"chunk_text": normalize_space(text), "start_word": 0, "end_word": len(words)}]
+    chunks: list[dict[str, Any]] = []
     start = 0
     while start < len(words):
         end = min(start + target_words, len(words))
         chunk = normalize_space(" ".join(words[start:end]))
         if chunk:
-            chunks.append(chunk)
+            chunks.append({"chunk_text": chunk, "start_word": start, "end_word": end})
         if end >= len(words):
             break
         start = max(end - overlap_words, start + 1)
@@ -467,6 +498,7 @@ class SearchEngine:
         matched_episodes = self._retrieve_episodes(normalized_query, intent, query_embedding)
         top_episodes = matched_episodes[:4]
         supporting_chunks = self._retrieve_chunks(normalized_query, top_episodes, query_embedding)
+        top_episodes = self._attach_episode_support(top_episodes, supporting_chunks)
         answer = self._answer_query(normalized_query, intent, top_episodes, supporting_chunks)
         support_note = None
         if not self.client:
@@ -478,6 +510,29 @@ class SearchEngine:
             "answer": answer,
             "support_note": support_note,
         }
+
+    def _attach_episode_support(
+        self,
+        episodes: list[dict[str, Any]],
+        chunks: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        best_chunk_by_episode: dict[str, dict[str, Any]] = {}
+        for chunk in chunks:
+            episode_id = chunk["episode_id"]
+            existing = best_chunk_by_episode.get(episode_id)
+            if existing is None or chunk.get("score", 0) > existing.get("score", 0):
+                best_chunk_by_episode[episode_id] = chunk
+
+        enriched: list[dict[str, Any]] = []
+        for episode in episodes:
+            episode_copy = dict(episode)
+            best_chunk = best_chunk_by_episode.get(episode["episode_id"])
+            if best_chunk:
+                episode_copy["discussion_excerpt"] = best_chunk["chunk_text"]
+                episode_copy["discussion_timestamp"] = best_chunk.get("timestamp_label")
+                episode_copy["discussion_timestamp_approx"] = best_chunk.get("timestamp_seconds") is not None
+            enriched.append(episode_copy)
+        return enriched
 
     def _load_cache(self) -> dict[str, Any]:
         if not CACHE_PATH.exists():
@@ -554,6 +609,7 @@ class SearchEngine:
             subtitle = strip_html(item.findtext("itunes:subtitle", default="", namespaces=ns))
             transcript_text = self._extract_transcript_from_item(item, ns)
             published, published_iso = parse_pub_date(item.findtext("pubDate", default=""))
+            duration_seconds = parse_duration_seconds(item.findtext("itunes:duration", default="", namespaces=ns))
             season, episode_number = extract_episode_numbers(title, subtitle, " ".join([description, content_text]))
             guid = normalize_space(item.findtext("guid", default="")) or normalize_space(
                 item.findtext("link", default="")
@@ -573,6 +629,7 @@ class SearchEngine:
                     "episode_number": episode_number,
                     "episode_url": self._resolve_episode_url(title, link, audio_url, SHOW_TITLE) or derived_episode_url,
                     "audio_url": audio_url,
+                    "duration_seconds": duration_seconds,
                     "description": description,
                     "summary_text": normalize_space(" ".join(part for part in [subtitle, description, content_text] if part)),
                     "transcript_text": transcript_text,
@@ -618,7 +675,14 @@ class SearchEngine:
 
         chunks = []
         embeddings: list[list[float]] = []
-        for chunk_text in chunk_transcript(transcript_text):
+        transcript_words = max(len(transcript_text.split()), 1)
+        duration_seconds = episode.get("duration_seconds")
+        for chunk_info in chunk_transcript(transcript_text):
+            chunk_text = chunk_info["chunk_text"]
+            start_word = chunk_info.get("start_word", 0)
+            start_seconds = None
+            if duration_seconds:
+                start_seconds = int(duration_seconds * (start_word / transcript_words))
             chunk_embedding = self._embed_text(chunk_text) if self.client else []
             chunks.append(
                 {
@@ -628,6 +692,8 @@ class SearchEngine:
                     "season": episode.get("season"),
                     "episode_number": episode.get("episode_number"),
                     "episode_url": episode.get("episode_url"),
+                    "timestamp_seconds": start_seconds,
+                    "timestamp_label": format_timestamp(start_seconds),
                     "chunk_text": chunk_text,
                     "embedding": chunk_embedding,
                 }
