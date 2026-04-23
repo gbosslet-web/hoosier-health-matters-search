@@ -141,6 +141,15 @@ def render_styles() -> None:
             margin-top: 0.7rem;
         }
 
+        .episode-excerpt-label {
+            color: var(--muted);
+            font-size: 0.82rem;
+            font-weight: 700;
+            letter-spacing: 0.02em;
+            text-transform: uppercase;
+            margin-bottom: 0.2rem;
+        }
+
         .episode-stamp {
             display: inline-block;
             color: var(--accent);
@@ -241,7 +250,7 @@ def render_episode_list(episodes: list[dict]) -> None:
             if episode.get("discussion_excerpt"):
                 safe_excerpt = escape(episode["discussion_excerpt"])
                 st.markdown(
-                    f'<div class="episode-excerpt">{safe_excerpt}</div>',
+                    f'<div class="episode-excerpt"><div class="episode-excerpt-label">Discusses</div>{safe_excerpt}</div>',
                     unsafe_allow_html=True,
                 )
             if episode.get("episode_url"):
