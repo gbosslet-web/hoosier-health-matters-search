@@ -192,11 +192,12 @@ def extract_person_name(query: str) -> str | None:
         r"(?:interview|interviewed|feature|featured|featuring)\s+([A-Za-z][A-Za-z'.-]+(?:\s+[A-Za-z][A-Za-z'.-]+)+)",
         r"(?:with)\s+([A-Za-z][A-Za-z'.-]+(?:\s+[A-Za-z][A-Za-z'.-]+)+)",
         r"was\s+([A-Za-z][A-Za-z'.-]+(?:\s+[A-Za-z][A-Za-z'.-]+)+)\s+interviewed",
+        r"(?:talk(?:ed)?\s+about|about)\s+([A-Za-z][A-Za-z'.-]+(?:\s+[A-Za-z][A-Za-z'.-]+)+)",
     ]
     for pattern in patterns:
         match = re.search(pattern, query, re.IGNORECASE)
         if match:
-            candidate = normalize_space(match.group(1).strip(" ?!.,")) 
+            candidate = normalize_space(match.group(1).strip(" ?!.,"))
             if len(candidate.split()) >= 2:
                 return candidate
 
@@ -472,9 +473,22 @@ def make_query_focused_excerpt(text: str, query: str, max_chars: int = 240) -> s
     return f"{truncated}..."
 
 
-def select_support_snippet(text: str, query: str, max_chars: int = 240) -> dict[str, str | None]:
+def select_support_snippet(
+    text: str,
+    query: str,
+    max_chars: int = 240,
+    person_name: str | None = None,
+) -> dict[str, str | None]:
     segments = extract_timeline_segments(text)
     if segments:
+        if person_name:
+            person_matched_segments = [
+                segment
+                for segment in segments
+                if guest_name_match_score(person_name, segment["text"]) >= 1.7
+            ]
+            if person_matched_segments:
+                segments = person_matched_segments
         best_segment = max(segments, key=lambda segment: score_excerpt_candidate(segment["text"], query))
         best_score = score_excerpt_candidate(best_segment["text"], query)
         if best_score <= 0:
@@ -482,6 +496,14 @@ def select_support_snippet(text: str, query: str, max_chars: int = 240) -> dict[
         excerpt = make_query_focused_excerpt(best_segment["text"], query, max_chars=max_chars)
         excerpt = clean_display_excerpt(excerpt, max_chars=max_chars)
         return {"excerpt": excerpt, "timestamp": best_segment["timestamp"]}
+
+    if person_name:
+        units = split_excerpt_units(text)
+        person_units = [unit for unit in units if guest_name_match_score(person_name, unit) >= 1.7]
+        if person_units:
+            best_unit = max(person_units, key=lambda unit: score_excerpt_candidate(unit, query))
+            excerpt = clean_display_excerpt(best_unit, max_chars=max_chars)
+            return {"excerpt": excerpt, "timestamp": None}
 
     excerpt = make_query_focused_excerpt(text, query, max_chars=max_chars)
     if excerpt and score_excerpt_candidate(excerpt, query) <= 0:
@@ -750,7 +772,11 @@ class SearchEngine:
                         or episode_copy.get("summary_text")
                         or source_text
                     )
-                support = select_support_snippet(source_text, query)
+                support = select_support_snippet(
+                    source_text,
+                    query,
+                    person_name=intent.get("person_name"),
+                )
                 if support.get("excerpt"):
                     episode_copy["discussion_excerpt"] = format_card_excerpt(
                         support["excerpt"],
@@ -1174,4 +1200,4 @@ class SearchEngine:
         if chunks:
             summary = chunks[0]["chunk_text"]
             return f"{label} appears most relevant. Based on the retrieved excerpt: {summary}"
-        return f"{label} appears to be the closest archive match for “{query}.”"
+        return f"{label} appears to be the closest archive match for “{query}."
