@@ -11,7 +11,7 @@ from episode_index import (
 )
 
 
-APP_DEPLOY_MARKER = "2026-04-23-casey-fix"
+APP_DEPLOY_MARKER = "2026-04-23-casey-fix-v2"
 
 st.set_page_config(
     page_title="Hoosier Health Matters Episode Search",
@@ -287,6 +287,7 @@ def render_sidebar(engine: SearchEngine) -> None:
         st.caption(f"Episodes indexed: {len(engine.episodes)}")
         if manifest.get("rss_url"):
             st.caption(f"RSS feed: {manifest['rss_url']}")
+        st.caption(f"Build: {APP_DEPLOY_MARKER}")
         if OPENAI_CONFIGURED:
             st.markdown('<div class="status-chip">OpenAI enabled</div>', unsafe_allow_html=True)
         else:
