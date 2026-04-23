@@ -11,6 +11,8 @@ from episode_index import (
 )
 
 
+APP_DEPLOY_MARKER = "2026-04-23-casey-fix"
+
 st.set_page_config(
     page_title="Hoosier Health Matters Episode Search",
     page_icon=str(get_logo_path()),
