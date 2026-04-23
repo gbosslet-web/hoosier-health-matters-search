@@ -25,7 +25,7 @@ DATA_DIR = BASE_DIR / "data"
 CACHE_PATH = DATA_DIR / "archive_index.json"
 ASSETS_DIR = BASE_DIR / "assets"
 DEFAULT_RSS_URL = os.getenv("HHM_RSS_URL", "https://feeds.buzzsprout.com/2446815.rss")
-CACHE_VERSION = 7
+CACHE_VERSION = 8
 EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 ANSWER_MODEL = os.getenv("OPENAI_RESPONSE_MODEL", "gpt-4.1-mini")
 TRANSCRIPTION_MODEL = os.getenv("OPENAI_TRANSCRIPTION_MODEL", "gpt-4o-mini-transcribe")
@@ -328,7 +328,7 @@ def format_timestamp(seconds: int | None) -> str | None:
     return f"{minutes}:{secs:02d}"
 
 
-TIMELINE_MARKER_RE = re.compile(r"(?P<ts>\b\d{1,2}:\d{2}(?::\d{2})?)\s*[-–]\s*")
+TIMELINE_MARKER_RE = re.compile(r"(?P<ts>\b\d{1,2}:\d{2}(?::\d{2})?)\s*(?:[-–]\s*)?")
 LOW_SIGNAL_MARKERS = [
     "intro",
     "wrap up",
@@ -361,7 +361,7 @@ def split_excerpt_units(text: str) -> list[str]:
     normalized = strip_episode_boilerplate(text)
     if not normalized:
         return []
-    units = re.split(r"(?:(?<=[.!?])\s+|\s+\d{1,2}:\d{2}\s*[-–]\s*)", normalized)
+    units = re.split(r"(?:(?<=[.!?])\s+|\s+\d{1,2}:\d{2}(?::\d{2})?\s*(?:[-–]\s*)?)", normalized)
     return [unit.strip(" -") for unit in units if unit.strip(" -")]
 
 
@@ -384,6 +384,10 @@ def extract_timeline_segments(text: str) -> list[dict[str, str]]:
                 continue
             segments.append({"timestamp": match.group("ts"), "text": segment_text})
     return segments
+
+
+def is_timeline_notes(text: str) -> bool:
+    return len(extract_timeline_segments(text)) >= 2
 
 
 def score_excerpt_candidate(text: str, query: str) -> float:
@@ -705,7 +709,10 @@ class SearchEngine:
         excerpt_backed_episodes = [episode for episode in top_episodes if episode.get("discussion_excerpt")]
         if excerpt_backed_episodes:
             top_episodes = excerpt_backed_episodes[:4]
-        answer = self._answer_query(normalized_query, intent, top_episodes, supporting_chunks)
+        answer_chunks = [
+            chunk for chunk in supporting_chunks if chunk.get("source") in {"rss", "transcribed"}
+        ]
+        answer = self._answer_query(normalized_query, intent, top_episodes, answer_chunks)
         support_note = None
         if not self.client:
             support_note = (
@@ -737,8 +744,12 @@ class SearchEngine:
             best_chunk = best_chunk_by_episode.get(episode["episode_id"])
             if best_chunk:
                 source_text = best_chunk["chunk_text"]
-                if episode_copy.get("transcript_source") in {"rss", "missing"}:
-                    source_text = episode_copy.get("summary_text") or source_text
+                if best_chunk.get("source") in {"timeline", "summary"}:
+                    source_text = (
+                        episode_copy.get("timeline_text")
+                        or episode_copy.get("summary_text")
+                        or source_text
+                    )
                 support = select_support_snippet(source_text, query)
                 if support.get("excerpt"):
                     episode_copy["discussion_excerpt"] = format_card_excerpt(
@@ -837,6 +848,8 @@ class SearchEngine:
             audio_url = enclosure.attrib.get("url", "").strip() if enclosure is not None else ""
             episode_id = guid or f"{published}-{normalize_key(title)}"
             derived_episode_url = derive_buzzsprout_episode_url_from_audio(audio_url)
+            summary_text = normalize_space(" ".join(part for part in [subtitle, description, content_text] if part))
+            timeline_text = summary_text if is_timeline_notes(summary_text) else ""
             episodes.append(
                 {
                     "episode_id": episode_id,
@@ -849,7 +862,8 @@ class SearchEngine:
                     "audio_url": audio_url,
                     "duration_seconds": duration_seconds,
                     "description": description,
-                    "summary_text": normalize_space(" ".join(part for part in [subtitle, description, content_text] if part)),
+                    "summary_text": summary_text,
+                    "timeline_text": timeline_text,
                     "transcript_text": transcript_text,
                 }
             )
@@ -877,6 +891,8 @@ class SearchEngine:
             if text:
                 transcript_candidates.append(strip_html(text))
         for candidate in transcript_candidates:
+            if is_timeline_notes(candidate):
+                continue
             if looks_like_transcript(candidate):
                 return candidate
         return ""
@@ -888,19 +904,22 @@ class SearchEngine:
             transcript_text = self._transcribe_audio(episode["audio_url"])
             transcript_source = "transcribed" if transcript_text else "missing"
 
-        if not transcript_text:
-            transcript_text = episode.get("summary_text") or episode.get("description") or ""
+        retrieval_text = transcript_text
+        chunk_source = transcript_source
+        if not retrieval_text:
+            retrieval_text = episode.get("timeline_text") or episode.get("summary_text") or episode.get("description") or ""
+            chunk_source = "timeline" if episode.get("timeline_text") else "summary"
 
         chunks = []
         embeddings: list[list[float]] = []
-        transcript_words = max(len(transcript_text.split()), 1)
+        retrieval_words = max(len(retrieval_text.split()), 1)
         duration_seconds = episode.get("duration_seconds")
-        for chunk_info in chunk_transcript(transcript_text):
+        for chunk_info in chunk_transcript(retrieval_text):
             chunk_text = chunk_info["chunk_text"]
             start_word = chunk_info.get("start_word", 0)
             start_seconds = None
             if duration_seconds:
-                start_seconds = int(duration_seconds * (start_word / transcript_words))
+                start_seconds = int(duration_seconds * (start_word / retrieval_words))
             chunk_embedding = self._embed_text(chunk_text) if self.client else []
             chunks.append(
                 {
@@ -912,6 +931,7 @@ class SearchEngine:
                     "episode_url": episode.get("episode_url"),
                     "timestamp_seconds": start_seconds,
                     "timestamp_label": format_timestamp(start_seconds),
+                    "source": chunk_source,
                     "chunk_text": chunk_text,
                     "embedding": chunk_embedding,
                 }
@@ -1101,7 +1121,7 @@ class SearchEngine:
             return self._fallback_answer(query, intent, episodes, chunks)
         if intent["intent"] == "topic_search" and not chunks:
             return (
-                "I found possibly relevant episodes, but I don’t have enough retrieved excerpt text to answer that topic safely."
+                "I found relevant episodes, but I don’t have transcript-backed excerpts to answer that question safely yet. The matched episodes below are still useful starting points."
             )
 
         context_lines = []
@@ -1154,4 +1174,4 @@ class SearchEngine:
         if chunks:
             summary = chunks[0]["chunk_text"]
             return f"{label} appears most relevant. Based on the retrieved excerpt: {summary}"
-        return f"{label} appears to be the closest archive match for “{query}."
+        return f"{label} appears to be the closest archive match for “{query}.”"
