@@ -397,6 +397,20 @@ def score_excerpt_candidate(text: str, query: str) -> float:
     return score
 
 
+def clean_display_excerpt(text: str, max_chars: int = 200) -> str:
+    cleaned = normalize_space(text)
+    if not cleaned:
+        return ""
+    cleaned = re.sub(r"\((?:here|see|link|newsletter)[^)]+\)", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^(?:here we discuss|gabe and tracey discuss|discussion of)\s+", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^in this episode[^.]*\.\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = normalize_space(cleaned).strip(" -.,;:")
+    if len(cleaned) <= max_chars:
+        return cleaned
+    truncated = cleaned[: max_chars - 1].rsplit(" ", 1)[0].strip()
+    return f"{truncated}..."
+
+
 def make_query_focused_excerpt(text: str, query: str, max_chars: int = 240) -> str:
     units = split_excerpt_units(text)
     if not units:
@@ -423,15 +437,14 @@ def select_support_snippet(text: str, query: str, max_chars: int = 240) -> dict[
         best_score = score_excerpt_candidate(best_segment["text"], query)
         if best_score <= 0:
             return {"excerpt": None, "timestamp": None}
-        excerpt = best_segment["text"]
-        if len(excerpt) > max_chars:
-            excerpt = excerpt[: max_chars - 1].rsplit(" ", 1)[0].strip() + "..."
+        excerpt = make_query_focused_excerpt(best_segment["text"], query, max_chars=max_chars)
+        excerpt = clean_display_excerpt(excerpt, max_chars=max_chars)
         return {"excerpt": excerpt, "timestamp": best_segment["timestamp"]}
 
     excerpt = make_query_focused_excerpt(text, query, max_chars=max_chars)
     if excerpt and score_excerpt_candidate(excerpt, query) <= 0:
         return {"excerpt": None, "timestamp": None}
-    return {"excerpt": excerpt, "timestamp": None}
+    return {"excerpt": clean_display_excerpt(excerpt, max_chars=max_chars), "timestamp": None}
 
 
 def chunk_transcript(text: str, target_words: int = 180, overlap_words: int = 45) -> list[dict[str, Any]]:
@@ -1013,82 +1026,4 @@ class SearchEngine:
                 continue
             chunk_blob = normalize_key(chunk["chunk_text"])
             keyword_score = sum(term in chunk_blob for term in query_terms) * 0.35
-            semantic_score = cosine_similarity(query_embedding, chunk["embedding"]) * 2.2 if query_embedding else 0.0
-            total_score = keyword_score + semantic_score
-            if total_score > 0:
-                chunk_copy = dict(chunk)
-                chunk_copy["score"] = total_score
-                candidates.append(chunk_copy)
-        candidates.sort(key=lambda chunk: chunk["score"], reverse=True)
-        return candidates[:6]
-
-    def _answer_query(
-        self,
-        query: str,
-        intent: dict[str, Any],
-        episodes: list[dict[str, Any]],
-        chunks: list[dict[str, Any]],
-    ) -> str:
-        if not episodes:
-            return (
-                "I couldn’t find a supported answer in the indexed archive. Try a different guest name, topic, or season and episode reference."
-            )
-
-        if not self.client:
-            return self._fallback_answer(query, intent, episodes, chunks)
-        if intent["intent"] == "topic_search" and not chunks:
-            return (
-                "I found possibly relevant episodes, but I don’t have enough retrieved excerpt text to answer that topic safely."
-            )
-
-        context_lines = []
-        for episode in episodes:
-            context_lines.append(
-                f"EPISODE: {format_episode_label(episode)} | Published: {episode.get('published') or 'Unknown'}"
-            )
-        for index, chunk in enumerate(chunks, start=1):
-            context_lines.append(f"EXCERPT {index}: {chunk['chunk_text']}")
-
-        prompt = (
-            "Answer the user using only the supplied episode metadata and excerpts. "
-            "Be concise, trustworthy, and explicit when the archive does not fully support an answer. "
-            "Mention episode title, season, episode number, and published date when relevant. "
-            "Do not fabricate episode details or guest appearances."
-        )
-        try:
-            response = self.client.responses.create(
-                model=ANSWER_MODEL,
-                input=[
-                    {"role": "system", "content": prompt},
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "input_text", "text": f"Query: {query}"},
-                            {"type": "input_text", "text": "\n".join(context_lines)},
-                        ],
-                    },
-                ],
-            )
-            return normalize_space(response.output_text)
-        except Exception:
-            return self._fallback_answer(query, intent, episodes, chunks)
-
-    def _fallback_answer(
-        self,
-        query: str,
-        intent: dict[str, Any],
-        episodes: list[dict[str, Any]],
-        chunks: list[dict[str, Any]],
-    ) -> str:
-        lead = episodes[0]
-        label = format_episode_label(lead)
-        if intent["intent"] == "episode_lookup":
-            published = lead.get("published") or "an unknown date"
-            return f"The best exact match is {label}, published on {published}."
-        if intent["intent"] == "guest_lookup":
-            published = lead.get("published") or "an unknown date"
-            return f"The archive most strongly points to {label}, published on {published}."
-        if chunks:
-            summary = chunks[0]["chunk_text"]
-            return f"{label} appears most relevant. Based on the retrieved excerpt: {summary}"
-        return f"{label} appears to be the closest archive match for “{query}."
+            semantic_score = cosine_similarity(query_embedding, chunk[
