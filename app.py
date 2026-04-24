@@ -1,6 +1,7 @@
 from html import escape
 
 import streamlit as st
+from openai import OpenAI
 
 from episode_index import (
     DEFAULT_RSS_URL,
@@ -11,7 +12,7 @@ from episode_index import (
 )
 
 
-APP_DEPLOY_MARKER = "2026-04-23-public-mode-v1"
+APP_DEPLOY_MARKER = "2026-04-24-v2-rag-architecture"
 
 st.set_page_config(
     page_title="Hoosier Health Matters Episode Search",
@@ -205,8 +206,31 @@ def render_styles() -> None:
     )
 
 
+@st.cache_resource(show_spinner=False, ttl=300)
+def get_public_engine() -> SearchEngine:
+    engine = SearchEngine.__new__(SearchEngine)
+    engine.rss_url = DEFAULT_RSS_URL
+    engine.client = OpenAI() if OPENAI_CONFIGURED else None
+    cache = engine._load_cache()
+    engine.episodes = cache.get("episodes", [])
+    engine.chunks = [chunk for episode in engine.episodes for chunk in episode.get("chunks", [])]
+    engine.index_manifest = cache.get(
+        "manifest",
+        {
+            "rss_url": DEFAULT_RSS_URL,
+            "last_indexed_at": None,
+            "episode_count": len(engine.episodes),
+            "openai_enabled": OPENAI_CONFIGURED,
+        },
+    )
+    engine.last_error = None
+    if not engine.episodes:
+        engine.refresh(force=False)
+    return engine
+
+
 @st.cache_resource(show_spinner=False)
-def get_engine() -> SearchEngine:
+def get_admin_engine() -> SearchEngine:
     return SearchEngine()
 
 
@@ -304,9 +328,11 @@ def render_sidebar(engine: SearchEngine) -> None:
             )
         if st.button("Refresh archive", use_container_width=True):
             engine.refresh(force=False)
+            st.cache_resource.clear()
             st.rerun()
         if st.button("Full rebuild", use_container_width=True):
             engine.refresh(force=True)
+            st.cache_resource.clear()
             st.rerun()
         with st.expander("Search examples"):
             st.markdown(
@@ -324,8 +350,8 @@ def render_sidebar(engine: SearchEngine) -> None:
 
 def main() -> None:
     render_styles()
-    engine = get_engine()
     admin_mode = is_admin_mode()
+    engine = get_admin_engine() if admin_mode else get_public_engine()
     if admin_mode:
         render_sidebar(engine)
 
@@ -363,7 +389,7 @@ def main() -> None:
         st.markdown('<div class="card">', unsafe_allow_html=True)
         st.markdown('<div class="section-title">Ready to search</div>', unsafe_allow_html=True)
         st.markdown(
-            '<div class="answer-copy">The archive checks the Buzzsprout feed automatically and only answers from retrieved episode excerpts.</div>',
+            '<div class="answer-copy">The archive uses a prepared search index and only answers from retrieved episode excerpts.</div>',
             unsafe_allow_html=True,
         )
         st.markdown("</div>", unsafe_allow_html=True)
