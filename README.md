@@ -23,13 +23,20 @@ export OPENAI_API_KEY="your-key-here"
 streamlit run app.py
 ```
 
+## Public and admin modes
+
+- The default app view is a public-facing search experience with no maintenance sidebar.
+- The archive still checks the Buzzsprout RSS feed automatically on startup for new or changed episodes.
+- To open the admin view with archive controls, add `?admin=1` to the app URL.
+- Admin mode shows archive status plus `Refresh archive` and `Full rebuild` controls.
+
 ## How the archive cache works
 
 - The archive is stored locally at `data/archive_index.json`.
 - On startup, the app fetches the RSS feed and compares feed episodes with the local cache.
 - If the cache is missing, outdated, or incomplete, the app rebuilds the index.
 - If only new or changed RSS entries appear, it reindexes just those episodes and keeps the rest.
-- The sidebar includes `Refresh archive` for incremental updates and `Full rebuild` for a clean refresh.
+- In admin mode, the sidebar includes `Refresh archive` for incremental updates and `Full rebuild` for a clean refresh.
 
 ## Transcript fallback behavior
 
