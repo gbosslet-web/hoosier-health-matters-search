@@ -26,14 +26,35 @@ streamlit run app.py
 ## Public and admin modes
 
 - The default app view is a public-facing search experience with no maintenance sidebar.
-- The archive still checks the Buzzsprout RSS feed automatically on startup for new or changed episodes.
+- The public app loads the prepared archive index first so visitors do not normally trigger indexing work.
+- If the prepared index is missing, the app can bootstrap one so a fresh deploy is not blank.
 - To open the admin view with archive controls, add `?admin=1` to the app URL.
 - Admin mode shows archive status plus `Refresh archive` and `Full rebuild` controls.
+
+## V2 RAG architecture
+
+The app is organized as a lightweight RAG system with separate responsibilities:
+
+- `build_index.py` is the indexing job. It fetches RSS, parses transcripts and timeline notes, chunks content, embeds searchable text, and writes `data/archive_index.json`.
+- `episode_index.py` owns retrieval and answer generation. It interprets the query, ranks episodes first, ranks supporting chunks inside those episodes, and only generates answers from retrieved evidence.
+- `app.py` is the public/admin Streamlit interface. Public mode loads the prepared index and renders results; admin mode can refresh or rebuild the index.
+
+To rebuild the index outside the public app:
+
+```bash
+python build_index.py
+```
+
+For a faster incremental update:
+
+```bash
+python build_index.py --incremental
+```
 
 ## How the archive cache works
 
 - The archive is stored locally at `data/archive_index.json`.
-- On startup, the app fetches the RSS feed and compares feed episodes with the local cache.
+- The public app loads this prepared file at startup and refreshes its in-memory copy periodically.
 - If the cache is missing, outdated, or incomplete, the app rebuilds the index.
 - If only new or changed RSS entries appear, it reindexes just those episodes and keeps the rest.
 - In admin mode, the sidebar includes `Refresh archive` for incremental updates and `Full rebuild` for a clean refresh.
