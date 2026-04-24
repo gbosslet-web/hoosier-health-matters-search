@@ -11,12 +11,13 @@ from episode_index import (
 )
 
 
-APP_DEPLOY_MARKER = "2026-04-23-casey-fix-v2"
+APP_DEPLOY_MARKER = "2026-04-23-public-mode-v1"
 
 st.set_page_config(
     page_title="Hoosier Health Matters Episode Search",
     page_icon=str(get_logo_path()),
     layout="centered",
+    initial_sidebar_state="collapsed",
 )
 
 
@@ -209,6 +210,13 @@ def get_engine() -> SearchEngine:
     return SearchEngine()
 
 
+def is_admin_mode() -> bool:
+    admin_value = st.query_params.get("admin", "")
+    if isinstance(admin_value, list):
+        admin_value = admin_value[0] if admin_value else ""
+    return str(admin_value).strip().lower() in {"1", "true", "yes", "admin"}
+
+
 def render_episode_list(episodes: list[dict]) -> None:
     if not episodes:
         st.markdown('<div class="result-section-title">Matched episode(s)</div>', unsafe_allow_html=True)
@@ -317,7 +325,9 @@ def render_sidebar(engine: SearchEngine) -> None:
 def main() -> None:
     render_styles()
     engine = get_engine()
-    render_sidebar(engine)
+    admin_mode = is_admin_mode()
+    if admin_mode:
+        render_sidebar(engine)
 
     st.markdown('<div class="hero-shell">', unsafe_allow_html=True)
     st.image(str(get_logo_path()), width=108)
@@ -353,7 +363,7 @@ def main() -> None:
         st.markdown('<div class="card">', unsafe_allow_html=True)
         st.markdown('<div class="section-title">Ready to search</div>', unsafe_allow_html=True)
         st.markdown(
-            '<div class="answer-copy">The archive refreshes from the Buzzsprout RSS feed and only answers from retrieved episode excerpts. Use the sidebar to refresh when a new episode is published.</div>',
+            '<div class="answer-copy">The archive checks the Buzzsprout feed automatically and only answers from retrieved episode excerpts.</div>',
             unsafe_allow_html=True,
         )
         st.markdown("</div>", unsafe_allow_html=True)
